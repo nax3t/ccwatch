@@ -79,6 +79,46 @@ _event() {
 
 _hist() { tail -n "${1:-20}" "$HISTORY" 2>/dev/null || true; }
 
+# Voice summary builder — takes total + pairs of (count "singular" "plural")
+# Usage: _voice_summary 5 "sorted by cognitive load" 3 "is working" "are working" 1 "is idle" "are idle"
+# Outputs: "5 sessions found, sorted by cognitive load. 3 are working. One is idle."
+_voice_summary() {
+  local total="$1" suffix="${2:-}"; shift 2
+  local msg
+  if [[ "$total" -eq 1 ]]; then msg="One session found"
+  else msg="${total} sessions found"; fi
+  [[ -n "$suffix" ]] && msg+=", ${suffix}"
+  msg+="."
+  while [[ $# -ge 3 ]]; do
+    local cnt="$1" sing="$2" plur="$3"; shift 3
+    [[ "$cnt" -gt 0 ]] || continue
+    if [[ "$cnt" -eq 1 ]]; then msg+=" One ${sing}."
+    else msg+=" ${cnt} ${plur}."; fi
+  done
+  echo "$msg"
+}
+
+# Log a permission request to the JSONL log
+_log_permission() {
+  local pid="$1" label="$2" tool_detail="$3"
+  _rotate_if_large "$PERMS_LOG"
+  jq -nc --arg t "$(date -Iseconds)" --arg P "$pid" --arg l "$label" \
+    --arg tool "$tool_detail" '{ts:$t,pane:$P,label:$l,tool:$tool}' >> "$PERMS_LOG" || true
+}
+
+# Read daemon state into _st_* variables via single jq call with validation
+# Sets: _st_n _st_w _st_q _st_p _st_e _st_lb _st_pl
+_read_state() {
+  _st_n=0 _st_w=0 _st_q=0 _st_p=0 _st_e=0 _st_lb="▱▱▱▱▱" _st_pl=0
+  local _f
+  _f=$(jq -r '[(.count//0),(.waiting//0),(.questions//0),(.permissions//0),
+    (.errors//0),(.load//"▱▱▱▱▱"),(.perms_logged//0)]|join("\t")' "$DAEMON_STATE" 2>/dev/null) || return
+  [[ -n "$_f" ]] && IFS=$'\t' read -r _st_n _st_w _st_q _st_p _st_e _st_lb _st_pl <<< "$_f"
+  [[ "$_st_n" =~ ^[0-9]+$ ]] || _st_n=0; [[ "$_st_w" =~ ^[0-9]+$ ]] || _st_w=0
+  [[ "$_st_q" =~ ^[0-9]+$ ]] || _st_q=0; [[ "$_st_p" =~ ^[0-9]+$ ]] || _st_p=0
+  [[ "$_st_e" =~ ^[0-9]+$ ]] || _st_e=0; [[ "$_st_pl" =~ ^[0-9]+$ ]] || _st_pl=0
+}
+
 _check_deps() {
   local miss=()
   for c in tmux curl jq; do command -v "$c" &>/dev/null || miss+=("$c"); done
@@ -271,9 +311,7 @@ _daemon_scan() {
     local si st sd; si=$(_detect "$content"); st=${si%%|*}; sd=${si#*|}
     case "$st" in
       permission) p=$((p+1)); w=$((w+1))
-        _rotate_if_large "$PERMS_LOG"
-        jq -nc --arg t "$(date -Iseconds)" --arg P "$pid" --arg l "$label" \
-          --arg tool "$sd" '{ts:$t,pane:$P,label:$l,tool:$tool}' >> "$PERMS_LOG" ;;
+        _log_permission "$pid" "$label" "$sd" ;;
       question) q=$((q+1)); w=$((w+1)) ;;
       error) e=$((e+1)); w=$((w+1)) ;;
     esac
@@ -404,22 +442,8 @@ _statusbar() {
   fi
   [[ $age -gt 120 ]] && { echo "#[fg=colour8]cc:stale#[default]"; return; }
 
-  # Single jq call for <50ms budget instead of 7 separate forks
-  local n=0 w=0 q=0 p=0 e=0 lb="▱▱▱▱▱" pl=0
-  local _fields
-  _fields=$(jq -r '[
-    (.count // 0), (.waiting // 0), (.questions // 0),
-    (.permissions // 0), (.errors // 0), (.load // "▱▱▱▱▱"),
-    (.perms_logged // 0)
-  ] | join("\t")' "$DAEMON_STATE" 2>/dev/null) || true
-  if [[ -n "$_fields" ]]; then
-    IFS=$'\t' read -r n w q p e lb pl <<< "$_fields"
-  fi
-
-  # Validate numeric fields
-  [[ "$n" =~ ^[0-9]+$ ]] || n=0; [[ "$w" =~ ^[0-9]+$ ]] || w=0
-  [[ "$q" =~ ^[0-9]+$ ]] || q=0; [[ "$p" =~ ^[0-9]+$ ]] || p=0
-  [[ "$e" =~ ^[0-9]+$ ]] || e=0; [[ "$pl" =~ ^[0-9]+$ ]] || pl=0
+  _read_state
+  local n=$_st_n w=$_st_w q=$_st_q p=$_st_p e=$_st_e lb=$_st_lb pl=$_st_pl
 
   [[ "$n" -eq 0 ]] && { echo "#[fg=colour8]cc:0#[default]"; return; }
 
@@ -461,14 +485,8 @@ _sbadge() { case "$1" in
 # ─── CMD: (default) ──────────────────────────────────────────────────────────
 _cmd_default() {
   [[ ! -f "$DAEMON_STATE" ]] && { echo "Run: ccwatch setup"; return; }
-  local n=0 w=0 q=0 p=0 e=0 lb="▱▱▱▱▱" pl=0
-  local _f
-  _f=$(jq -r '[(.count//0),(.waiting//0),(.questions//0),(.permissions//0),
-    (.errors//0),(.load//"▱▱▱▱▱"),(.perms_logged//0)]|join("\t")' "$DAEMON_STATE" 2>/dev/null) || true
-  [[ -n "$_f" ]] && IFS=$'\t' read -r n w q p e lb pl <<< "$_f"
-  [[ "$n" =~ ^[0-9]+$ ]] || n=0; [[ "$w" =~ ^[0-9]+$ ]] || w=0
-  [[ "$q" =~ ^[0-9]+$ ]] || q=0; [[ "$p" =~ ^[0-9]+$ ]] || p=0
-  [[ "$e" =~ ^[0-9]+$ ]] || e=0; [[ "$pl" =~ ^[0-9]+$ ]] || pl=0
+  _read_state
+  local n=$_st_n w=$_st_w q=$_st_q p=$_st_p e=$_st_e lb=$_st_lb pl=$_st_pl
   echo -e "${CG}●${R} ${n} sessions  ${lb}"
   [[ "$q" -gt 0 ]] && echo -e "  ${CC}❓ ${q} question(s)${R}"
   [[ "$p" -gt 0 ]] && echo -e "  ${CY}🔑 ${p} permission(s)${R}"
@@ -476,50 +494,106 @@ _cmd_default() {
   [[ "$pl" -gt 10 ]] && echo -e "  ${CM}📋 ${pl} perms → ccwatch permissions${R}"
   # Voice narration
   local vmsg
-  if [[ "$n" -eq 1 ]]; then vmsg="One session found."
-  else vmsg="${n} sessions found."; fi
-  if [[ "$w" -gt 0 ]]; then
-    if [[ "$w" -eq 1 ]]; then vmsg+=" One is waiting."
-    else vmsg+=" ${w} are waiting."; fi
-  fi
-  [[ "$q" -gt 0 ]] && { if [[ "$q" -eq 1 ]]; then vmsg+=" One question pending."
-    else vmsg+=" ${q} questions pending."; fi; }
-  [[ "$p" -gt 0 ]] && { if [[ "$p" -eq 1 ]]; then vmsg+=" One permission request."
-    else vmsg+=" ${p} permission requests."; fi; }
-  [[ "$e" -gt 0 ]] && { if [[ "$e" -eq 1 ]]; then vmsg+=" One error."
-    else vmsg+=" ${e} errors."; fi; }
+  vmsg=$(_voice_summary "$n" "" \
+    "$w" "is waiting" "are waiting" \
+    "$q" "question pending" "questions pending" \
+    "$p" "permission request" "permission requests" \
+    "$e" "error" "errors")
   [[ "$w" -eq 0 ]] && [[ "$e" -eq 0 ]] && vmsg+=" All sessions running smoothly."
   _voice_alert "$vmsg"
   return 0
 }
 
 # ─── CMD: ls ──────────────────────────────────────────────────────────────────
-_cmd_ls() {
-  _check_deps; _check_api
-  local S=() P=() A=(); local h; h=$(_hist 20)
+# Sub-functions share caller's namespace (_LS_S, _LS_P, _LS_A arrays)
 
-  # Discover all sessions first
+_ls_analyze() {
+  local h; h=$(_hist 20)
   while IFS='|' read -r pid lbl pos; do [[ -z "$pid" ]] && continue
-    S+=("$pid|$lbl"); P+=("$pos")
+    _LS_S+=("$pid|$lbl"); _LS_P+=("$pos")
     _event "$pid" "scan" ""
   done < <(_discover)
-  if [[ ${#S[@]} -eq 0 ]]; then echo -e "${D}No Claude Code sessions.${R}"; return; fi
+  [[ ${#_LS_S[@]} -eq 0 ]] && { echo -e "${D}No Claude Code sessions.${R}"; return 1; }
 
-  # Parallel analysis — all API calls run concurrently
-  echo -e "${D}Analyzing ${#S[@]} session(s)...${R}"
+  echo -e "${D}Analyzing ${#_LS_S[@]} session(s)...${R}"
   local _adir; _adir=$(mktemp -d "$CACHE/par.XXXXXX") || { echo "ERROR: mktemp failed"; return 1; }
   trap 'rm -rf "$_adir" 2>/dev/null' RETURN
-  for i in "${!S[@]}"; do
-    local pid lbl; IFS='|' read -r pid lbl <<< "${S[$i]}"
+  for i in "${!_LS_S[@]}"; do
+    local pid lbl; IFS='|' read -r pid lbl <<< "${_LS_S[$i]}"
     ( _analyze "$(_cap "$pid")" "$lbl" "$h" > "$_adir/$i" ) &
   done
   wait
-  for i in "${!S[@]}"; do A+=("$(cat "$_adir/$i")"); done
-  rm -rf "$_adir"
+  for i in "${!_LS_S[@]}"; do _LS_A+=("$(cat "$_adir/$i")"); done
+}
 
-  local SC=(); for i in "${!A[@]}"; do
-    SC+=($(jq -r '.cognitive_load.score // 0' <<< "${A[$i]}" 2>/dev/null || echo 0)); done
-  # Bash insertion sort — avoids for|echo|sort|awk pipeline (4 forks → 0)
+_ls_render_session() {
+  local idx="$1" first="$2"
+  local pid lbl; IFS='|' read -r pid lbl <<< "${_LS_S[$idx]}"
+  local a="${_LS_A[$idx]}" pos="${_LS_P[$idx]}"
+  local st ts na br cs cl ss sa
+  local _sf
+  _sf=$(jq -r '[(.status//"?"),(.task_summary//"?"),(.current_action//"?"),
+    (.branch//"?"),(.cognitive_load.score//0),(.cognitive_load.label//"?"),
+    (.cognitive_load.safe_to_switch_away//false),(.suggested_action//"")
+  ]|join("\t")' <<< "$a" 2>/dev/null) || true
+  IFS=$'\t' read -r st ts na br cs cl ss sa <<< "$_sf"
+  [[ "$cs" -le 2 ]] && _ls_lo+=("$lbl")
+  case "$st" in working) _ls_vw=$((_ls_vw+1));; waiting) _ls_vwt=$((_ls_vwt+1));;
+    idle) _ls_vi=$((_ls_vi+1));; error) _ls_ve=$((_ls_ve+1));; esac
+
+  [[ "$first" -ne 1 ]] && echo -e "  ${D}──────────────────────────────────────────────────────────────${R}"
+
+  local pos_tag=""; [[ -n "$pos" ]] && pos_tag=" ${D}(${pos})${R}"
+  local sw; if [[ "$ss" == "true" ]]; then sw="${CG}↔${R}"; else sw="${CY}⚠${R}"; fi
+  echo -e "  $(_sbadge "$st") ${B}${lbl}${R}${pos_tag}  ${D}[${br}]${R}  $(_cbar "$cs" "$cl")  $sw"
+  echo -e "  ${D}│${R} ${ts}"
+  echo -e "  ${D}│${R} ${D}↳ ${na}${R}"
+  [[ -n "$sa" ]] && echo -e "  ${D}│${R} ${CC}→ ${sa}${R}"
+
+  local qq tn pd _af
+  _af=$(jq -r '[(.pending_question//"null"),
+    (.pending_permission.tool//"null"),(.pending_permission.detail//"null")
+  ]|join("\t")' <<< "$a" 2>/dev/null) || true
+  IFS=$'\t' read -r qq tn pd <<< "$_af"
+  if [[ "$qq" != "null" ]] && [[ -n "$qq" ]]; then
+    echo -e "  ${D}│${R} ${BC}${CW} ❓ ${R} ${CC}${qq}${R}"; _ls_pn=$((_ls_pn+1))
+  fi
+  if [[ "$tn" != "null" ]] && [[ -n "$tn" ]]; then
+    echo -e "  ${D}│${R} ${BY}${CW} 🔑 ${R} ${CY}${tn}(${pd})${R}"
+    _log_permission "$pid" "$lbl" "${tn}(${pd})"
+    _ls_pn=$((_ls_pn+1))
+  fi
+
+  _ls_vd+=" Session ${lbl}, status ${st}, ${cl} cognitive load. ${ts}. Currently ${na}."
+  [[ "$qq" != "null" ]] && [[ -n "$qq" ]] && _ls_vd+=" Asking: ${qq}"
+  [[ "$tn" != "null" ]] && [[ -n "$tn" ]] && _ls_vd+=" Waiting for permission to use ${tn}."
+  [[ -n "$sa" ]] && _ls_vd+=" Suggested action: ${sa}."
+}
+
+_ls_footer_and_voice() {
+  echo -e "  ${D}──────────────────────────────────────────────────────────────${R}"
+  [[ $_ls_pn -gt 0 ]] && echo -e "  ${CY}${B}⚡ ${_ls_pn} need attention${R}"
+  [[ ${#_ls_lo[@]} -gt 0 ]] && echo -e "  ${D}💡 Quick switch: ${_ls_lo[*]}${R}"
+  echo ""
+  local vmsg
+  vmsg=$(_voice_summary "${#_LS_S[@]}" "sorted by cognitive load" \
+    "$_ls_vw" "is working" "are working" \
+    "$_ls_vi" "is idle" "are idle" \
+    "$_ls_vwt" "is waiting" "are waiting" \
+    "$_ls_ve" "has errors" "have errors" \
+    "$_ls_pn" "session needs attention" "sessions need attention")
+  vmsg+="$_ls_vd"
+  _voice_alert "$vmsg"
+}
+
+_cmd_ls() {
+  _check_deps; _check_api
+  local _LS_S=() _LS_P=() _LS_A=()
+  _ls_analyze || return
+
+  # Sort by cognitive load (bash insertion sort — 0 forks)
+  local SC=(); for i in "${!_LS_A[@]}"; do
+    SC+=($(jq -r '.cognitive_load.score // 0' <<< "${_LS_A[$i]}" 2>/dev/null || echo 0)); done
   local SI=()
   for i in "${!SC[@]}"; do
     local j=0
@@ -528,91 +602,14 @@ _cmd_ls() {
   done
 
   echo ""
-  echo -e "  ${B}${CC}🔭 Sessions${R}  ${D}(${#S[@]} found, sorted by cognitive load)${R}"
+  echo -e "  ${B}${CC}🔭 Sessions${R}  ${D}(${#_LS_S[@]} found, sorted by cognitive load)${R}"
   echo -e "  ${D}──────────────────────────────────────────────────────────────${R}"
-  local pn=0 lo=() first=1 v_working=0 v_waiting=0 v_idle=0 v_error=0 vdetails=""
+  local _ls_pn=0 _ls_lo=() _ls_vw=0 _ls_vwt=0 _ls_vi=0 _ls_ve=0 _ls_vd="" first=1
   for idx in "${SI[@]}"; do
-    local pid lbl; IFS='|' read -r pid lbl <<< "${S[$idx]}"
-    local a="${A[$idx]}" pos="${P[$idx]}"
-    local st ts na br cs cl ss sa
-    local _sf
-    _sf=$(jq -r '[(.status//"?"),(.task_summary//"?"),(.current_action//"?"),
-      (.branch//"?"),(.cognitive_load.score//0),(.cognitive_load.label//"?"),
-      (.cognitive_load.safe_to_switch_away//false),(.suggested_action//"")
-    ]|join("\t")' <<< "$a" 2>/dev/null) || true
-    IFS=$'\t' read -r st ts na br cs cl ss sa <<< "$_sf"
-    if [[ "$cs" -le 2 ]]; then lo+=("$lbl"); fi
-    case "$st" in working) v_working=$((v_working+1));; waiting) v_waiting=$((v_waiting+1));;
-      idle) v_idle=$((v_idle+1));; error) v_error=$((v_error+1));; esac
-
-    if [[ "$first" -ne 1 ]]; then
-      echo -e "  ${D}──────────────────────────────────────────────────────────────${R}"
-    fi
+    _ls_render_session "$idx" "$first"
     first=0
-
-    # Header: badge + label + position + branch
-    local pos_tag=""
-    if [[ -n "$pos" ]]; then pos_tag=" ${D}(${pos})${R}"; fi
-    local sw; if [[ "$ss" == "true" ]]; then sw="${CG}↔${R}"; else sw="${CY}⚠${R}"; fi
-    echo -e "  $(_sbadge "$st") ${B}${lbl}${R}${pos_tag}  ${D}[${br}]${R}  $(_cbar "$cs" "$cl")  $sw"
-
-    # Task + action
-    echo -e "  ${D}│${R} ${ts}"
-    echo -e "  ${D}│${R} ${D}↳ ${na}${R}"
-    if [[ -n "$sa" ]]; then
-      echo -e "  ${D}│${R} ${CC}→ ${sa}${R}"
-    fi
-
-    # Alerts — extract question and permission tool/detail in one jq call
-    local qq tn pd
-    local _af
-    _af=$(jq -r '[(.pending_question//"null"),
-      (.pending_permission.tool//"null"),(.pending_permission.detail//"null")
-    ]|join("\t")' <<< "$a" 2>/dev/null) || true
-    IFS=$'\t' read -r qq tn pd <<< "$_af"
-    if [[ "$qq" != "null" ]] && [[ -n "$qq" ]]; then
-      echo -e "  ${D}│${R} ${BC}${CW} ❓ ${R} ${CC}${qq}${R}"; pn=$((pn+1))
-    fi
-    if [[ "$tn" != "null" ]] && [[ -n "$tn" ]]; then
-      echo -e "  ${D}│${R} ${BY}${CW} 🔑 ${R} ${CY}${tn}(${pd})${R}"
-      _rotate_if_large "$PERMS_LOG"
-      jq -nc --arg t "$(date -Iseconds)" --arg P "$pid" --arg l "$lbl" --arg tool "${tn}(${pd})" \
-        '{ts:$t,pane:$P,label:$l,tool:$tool}' >> "$PERMS_LOG" || true
-      pn=$((pn+1))
-    fi
-
-    # Build per-session voice narration
-    vdetails+=" Session ${lbl}, status ${st}, ${cl} cognitive load. ${ts}. Currently ${na}."
-    if [[ "$qq" != "null" ]] && [[ -n "$qq" ]]; then
-      vdetails+=" Asking: ${qq}"
-    fi
-    if [[ "$tn" != "null" ]] && [[ -n "$tn" ]]; then
-      vdetails+=" Waiting for permission to use ${tn}."
-    fi
-    [[ -n "$sa" ]] && vdetails+=" Suggested action: ${sa}."
   done
-  echo -e "  ${D}──────────────────────────────────────────────────────────────${R}"
-  if [[ $pn -gt 0 ]]; then echo -e "  ${CY}${B}⚡ ${pn} need attention${R}"; fi
-  if [[ ${#lo[@]} -gt 0 ]]; then echo -e "  ${D}💡 Quick switch: ${lo[*]}${R}"; fi
-  echo ""
-  # Voice narration — overview then per-session details
-  local vmsg
-  if [[ ${#S[@]} -eq 1 ]]; then vmsg="One session found, sorted by cognitive load."
-  else vmsg="${#S[@]} sessions found, sorted by cognitive load."; fi
-  [[ $v_working -gt 0 ]] && { if [[ $v_working -eq 1 ]]; then vmsg+=" One is working."
-    else vmsg+=" ${v_working} are working."; fi; }
-  [[ $v_idle -gt 0 ]] && { if [[ $v_idle -eq 1 ]]; then vmsg+=" One is idle."
-    else vmsg+=" ${v_idle} are idle."; fi; }
-  [[ $v_waiting -gt 0 ]] && { if [[ $v_waiting -eq 1 ]]; then vmsg+=" One is waiting."
-    else vmsg+=" ${v_waiting} are waiting."; fi; }
-  [[ $v_error -gt 0 ]] && { if [[ $v_error -eq 1 ]]; then vmsg+=" One has errors."
-    else vmsg+=" ${v_error} have errors."; fi; }
-  if [[ $pn -gt 0 ]]; then
-    if [[ $pn -eq 1 ]]; then vmsg+=" One session needs attention."
-    else vmsg+=" ${pn} sessions need attention."; fi
-  fi
-  vmsg+="$vdetails"
-  _voice_alert "$vmsg"
+  _ls_footer_and_voice
 }
 
 # ─── CMD: status ──────────────────────────────────────────────────────────────
@@ -662,12 +659,26 @@ _cmd_status() {
 # ─── CMD: suggest ─────────────────────────────────────────────────────────────
 _cmd_suggest() {
   _check_deps; _check_api
-  local all="" n=0
+  local S=() n=0
   echo -e "${D}Analyzing all sessions...${R}"
   while IFS='|' read -r pid lbl _pos; do [[ -z "$pid" ]] && continue
-    all+="\n--- ${lbl} ---\n$(_analyze "$(_cap "$pid")" "$lbl" "")\n"; n=$((n+1))
+    S+=("$pid|$lbl"); n=$((n+1))
   done < <(_discover)
   [[ $n -eq 0 ]] && { echo "No sessions."; return; }
+
+  # Parallel analysis — all API calls run concurrently
+  local _adir; _adir=$(mktemp -d "$CACHE/par.XXXXXX") || { echo "ERROR: mktemp failed"; return 1; }
+  trap 'rm -rf "$_adir" 2>/dev/null' RETURN
+  for i in "${!S[@]}"; do
+    local pid lbl; IFS='|' read -r pid lbl <<< "${S[$i]}"
+    ( _analyze "$(_cap "$pid")" "$lbl" "" > "$_adir/$i" ) &
+  done
+  wait
+  local all=""
+  for i in "${!S[@]}"; do
+    local lbl; IFS='|' read -r _ lbl <<< "${S[$i]}"
+    all+="\n--- ${lbl} ---\n$(cat "$_adir/$i")\n"
+  done
   local r; r=$(_call "think" \
     'Developer workflow advisor. Given session analyses + history, provide:
 PRIORITY: Which sessions to address first (1 line each, blocked first)

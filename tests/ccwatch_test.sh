@@ -97,8 +97,8 @@ _extract_fn() {
 
 # Extract and eval each function we need to test
 for fn in _validate_model _validate_pane_id _check_api _check_deps \
-          _detect _pane_pos _sbadge _cbar _statusbar _rotate_if_large \
-          _voice_enabled _voice_alert _log _resolve_api_key; do
+          _detect _pane_pos _sbadge _cbar _read_state _statusbar _rotate_if_large \
+          _voice_enabled _voice_alert _voice_summary _log _log_permission _resolve_api_key; do
   eval "$(_extract_fn "$fn")"
 done
 
@@ -383,6 +383,20 @@ _assert_eq "disabled after file removed" "1" "$?"
 
 # Restore
 CCWATCH_VOICE="false"
+
+# ─── 11b. Voice summary: _voice_summary ──────────────────────────────────────
+echo ""
+echo "=== _voice_summary ==="
+
+_assert_eq "single session" "One session found." "$(_voice_summary 1 "")"
+_assert_eq "multiple sessions" "5 sessions found." "$(_voice_summary 5 "")"
+_assert_eq "with suffix" "3 sessions found, sorted by cognitive load." "$(_voice_summary 3 "sorted by cognitive load")"
+_assert_eq "with counts" "5 sessions found. 2 are waiting. One error." \
+  "$(_voice_summary 5 "" 2 "is waiting" "are waiting" 1 "error" "errors")"
+_assert_eq "zero counts skipped" "3 sessions found." \
+  "$(_voice_summary 3 "" 0 "is waiting" "are waiting" 0 "error" "errors")"
+_assert_eq "singular counts" "One session found. One is waiting." \
+  "$(_voice_summary 1 "" 1 "is waiting" "are waiting")"
 
 # ─── 12. API key resolution: _resolve_api_key ────────────────────────────────
 echo ""
