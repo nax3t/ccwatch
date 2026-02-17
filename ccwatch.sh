@@ -310,7 +310,8 @@ _daemon_scan() {
   local prev; prev=$(tmux show-option -gqv @ccw_prev_w 2>/dev/null || echo 0)
   if [[ "$w" -gt "${prev:-0}" ]] && [[ "$w" -gt 0 ]]; then
     echo -ne '\a'
-    _voice_alert "$w session$([ "$w" -gt 1 ] && echo s) need attention"
+    if [[ "$w" -eq 1 ]]; then _voice_alert "One session needs attention."
+    else _voice_alert "$w sessions need attention."; fi
   fi
   tmux set-option -g @ccw_prev_w "$w" 2>/dev/null || true
 }
@@ -463,12 +464,21 @@ _cmd_default() {
   [[ "$p" -gt 0 ]] && echo -e "  ${CY}🔑 ${p} permission(s)${R}"
   [[ "$e" -gt 0 ]] && echo -e "  ${CR}✖ ${e} error(s)${R}"
   [[ "$pl" -gt 10 ]] && echo -e "  ${CM}📋 ${pl} perms → ccwatch permissions${R}"
-  # Voice summary
-  local vmsg="${n} sessions."
-  [[ "$w" -gt 0 ]] && vmsg+=" ${w} waiting."
-  [[ "$q" -gt 0 ]] && vmsg+=" ${q} questions."
-  [[ "$p" -gt 0 ]] && vmsg+=" ${p} permissions."
-  [[ "$e" -gt 0 ]] && vmsg+=" ${e} errors."
+  # Voice narration
+  local vmsg
+  if [[ "$n" -eq 1 ]]; then vmsg="One session found."
+  else vmsg="${n} sessions found."; fi
+  if [[ "$w" -gt 0 ]]; then
+    if [[ "$w" -eq 1 ]]; then vmsg+=" One is waiting."
+    else vmsg+=" ${w} are waiting."; fi
+  fi
+  [[ "$q" -gt 0 ]] && { if [[ "$q" -eq 1 ]]; then vmsg+=" One question pending."
+    else vmsg+=" ${q} questions pending."; fi; }
+  [[ "$p" -gt 0 ]] && { if [[ "$p" -eq 1 ]]; then vmsg+=" One permission request."
+    else vmsg+=" ${p} permission requests."; fi; }
+  [[ "$e" -gt 0 ]] && { if [[ "$e" -eq 1 ]]; then vmsg+=" One error."
+    else vmsg+=" ${e} errors."; fi; }
+  [[ "$w" -eq 0 ]] && [[ "$e" -eq 0 ]] && vmsg+=" All sessions running smoothly."
   _voice_alert "$vmsg"
   return 0
 }
@@ -503,7 +513,7 @@ _cmd_ls() {
   echo ""
   echo -e "  ${B}${CC}🔭 Sessions${R}  ${D}(${#S[@]} found, sorted by cognitive load)${R}"
   echo -e "  ${D}──────────────────────────────────────────────────────────────${R}"
-  local pn=0 lo=() first=1 v_working=0 v_waiting=0 v_idle=0 v_error=0
+  local pn=0 lo=() first=1 v_working=0 v_waiting=0 v_idle=0 v_error=0 vdetails=""
   for idx in "${SI[@]}"; do
     local pid lbl; IFS='|' read -r pid lbl <<< "${S[$idx]}"
     local a="${A[$idx]}" pos="${P[$idx]}"
@@ -554,18 +564,38 @@ _cmd_ls() {
         '{ts:$t,pane:$P,label:$l,tool:$tool}' >> "$PERMS_LOG" || true
       pn=$((pn+1))
     fi
+
+    # Build per-session voice narration
+    vdetails+=" Session ${lbl}, status ${st}, ${cl} cognitive load. ${ts}. Currently ${na}."
+    if [[ "$qq" != "null" ]] && [[ -n "$qq" ]]; then
+      vdetails+=" Asking: ${qq}"
+    fi
+    if [[ "$pp" != "null" ]] && [[ -n "$pp" ]]; then
+      vdetails+=" Waiting for permission to use ${tn}."
+    fi
+    [[ -n "$sa" ]] && vdetails+=" Suggested action: ${sa}."
   done
   echo -e "  ${D}──────────────────────────────────────────────────────────────${R}"
   if [[ $pn -gt 0 ]]; then echo -e "  ${CY}${B}⚡ ${pn} need attention${R}"; fi
   if [[ ${#lo[@]} -gt 0 ]]; then echo -e "  ${D}💡 Quick switch: ${lo[*]}${R}"; fi
   echo ""
-  # Voice summary
-  local vmsg="${#S[@]} sessions."
-  [[ $v_working -gt 0 ]] && vmsg+=" ${v_working} working."
-  [[ $v_idle -gt 0 ]] && vmsg+=" ${v_idle} idle."
-  [[ $v_waiting -gt 0 ]] && vmsg+=" ${v_waiting} waiting."
-  [[ $v_error -gt 0 ]] && vmsg+=" ${v_error} with errors."
-  [[ $pn -gt 0 ]] && vmsg+=" ${pn} need attention."
+  # Voice narration — overview then per-session details
+  local vmsg
+  if [[ ${#S[@]} -eq 1 ]]; then vmsg="One session found, sorted by cognitive load."
+  else vmsg="${#S[@]} sessions found, sorted by cognitive load."; fi
+  [[ $v_working -gt 0 ]] && { if [[ $v_working -eq 1 ]]; then vmsg+=" One is working."
+    else vmsg+=" ${v_working} are working."; fi; }
+  [[ $v_idle -gt 0 ]] && { if [[ $v_idle -eq 1 ]]; then vmsg+=" One is idle."
+    else vmsg+=" ${v_idle} are idle."; fi; }
+  [[ $v_waiting -gt 0 ]] && { if [[ $v_waiting -eq 1 ]]; then vmsg+=" One is waiting."
+    else vmsg+=" ${v_waiting} are waiting."; fi; }
+  [[ $v_error -gt 0 ]] && { if [[ $v_error -eq 1 ]]; then vmsg+=" One has errors."
+    else vmsg+=" ${v_error} have errors."; fi; }
+  if [[ $pn -gt 0 ]]; then
+    if [[ $pn -eq 1 ]]; then vmsg+=" One session needs attention."
+    else vmsg+=" ${pn} sessions need attention."; fi
+  fi
+  vmsg+="$vdetails"
   _voice_alert "$vmsg"
 }
 
@@ -594,10 +624,22 @@ _cmd_status() {
   [[ "$qq" != "null" ]] && { echo ""; echo -e "  ${BC}${CW} ❓ ${R} ${CC}${qq}${R}"; }
   local pp; pp=$(echo "$a"|jq -r '.pending_permission//"null"')
   [[ "$pp" != "null" ]] && { echo ""; echo -e "  ${BY}${CW} 🔑 ${R} ${CY}$(echo "$pp"|jq -r '"\(.tool)(\(.detail)): \(.description)"')${R}"; }
-  # Voice summary
+  # Voice narration — comprehensive status readout
   local vst; vst=$(echo "$a"|jq -r '.status//"unknown"' 2>/dev/null)
   local vts; vts=$(echo "$a"|jq -r '.task_summary//"unknown"' 2>/dev/null)
-  _voice_alert "${l} is ${vst}. ${cl} cognitive load. ${vts}"
+  local vna; vna=$(echo "$a"|jq -r '.current_action//"unknown"' 2>/dev/null)
+  local vbr; vbr=$(echo "$a"|jq -r '.branch//"unknown"' 2>/dev/null)
+  local vcr; vcr=$(echo "$a"|jq -r '.cognitive_load.reasoning//""' 2>/dev/null)
+  local vcc; vcc=$(echo "$a"|jq -r '.cognitive_load.context_cost//""' 2>/dev/null)
+  local vmsg="Session ${l} on branch ${vbr}. Status is ${vst}, with ${cl} cognitive load."
+  vmsg+=" Task: ${vts}. Currently: ${vna}."
+  [[ -n "$vcr" ]] && vmsg+=" ${vcr}."
+  [[ -n "$vcc" ]] && vmsg+=" Switch cost: ${vcc}."
+  [[ -n "$f" ]] && vmsg+=" Files involved: ${f}."
+  [[ -n "$sa" ]] && vmsg+=" Suggested next step: ${sa}."
+  [[ "$qq" != "null" ]] && vmsg+=" Claude is asking: ${qq}."
+  [[ "$pp" != "null" ]] && vmsg+=" Waiting for permission approval."
+  _voice_alert "$vmsg"
 }
 
 # ─── CMD: suggest ─────────────────────────────────────────────────────────────
@@ -617,9 +659,9 @@ BATCH: Group related work. Mark quick check-ins vs deep focus. Be direct.' \
     "Sessions:\n${all}\n\nHistory:\n$(_hist 30)" 500) || { echo "API error"; return 1; }
   echo ""; echo -e "${B}${CC}  💡 What to do next${R}"; echo ""
   echo "$r" | while IFS= read -r line; do echo -e "  $line"; done; echo ""
-  # Voice: read first 2 lines of suggestion
-  local vtip; vtip=$(echo "$r" | head -2 | tr '\n' ' ')
-  _voice_alert "$vtip"
+  # Voice narration — read the full suggestion
+  local vtip; vtip=$(echo "$r" | tr '\n' ' ')
+  _voice_alert "Here is what to do next. ${vtip}"
 }
 
 # ─── CMD: permissions ─────────────────────────────────────────────────────────
@@ -743,7 +785,7 @@ _voice_alert() {
   msg=$(echo "$msg" | sed 's/\x1b\[[0-9;]*m//g')
   msg=$(echo "$msg" | tr -cd 'a-zA-Z0-9 .,;:!?()-')
   # Truncate to prevent abuse
-  msg="${msg:0:200}"
+  msg="${msg:0:2000}"
   # Reject empty after sanitization
   [[ -z "$msg" ]] && return
 
