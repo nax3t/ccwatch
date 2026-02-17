@@ -283,6 +283,30 @@ _assert_match "active: question indicator" "\\?1" "$out"
 _assert_match "active: permission indicator" "!1" "$out"
 _assert_match "active: error indicator" "x1" "$out"
 
+# Garbage JSON in state file → graceful fallback
+echo 'this is not json at all' > "$DAEMON_STATE"
+touch "$DAEMON_STATE"
+out=$(_statusbar)
+_assert_match "garbage JSON: graceful fallback" "cc:0" "$out"
+
+# Empty state file → graceful fallback
+> "$DAEMON_STATE"
+touch "$DAEMON_STATE"
+out=$(_statusbar)
+_assert_match "empty state file: graceful fallback" "cc:0" "$out"
+
+# Missing fields → defaults kick in
+echo '{"count":2}' > "$DAEMON_STATE"
+touch "$DAEMON_STATE"
+out=$(_statusbar)
+_assert_match "missing fields: session count works" "●2" "$out"
+
+# Non-numeric values → validation catches them
+echo '{"count":"abc","waiting":"xyz","questions":0,"permissions":0,"errors":0,"load":"▱▱▱▱▱","perms_logged":0}' > "$DAEMON_STATE"
+touch "$DAEMON_STATE"
+out=$(_statusbar)
+_assert_match "non-numeric values: graceful fallback" "cc:0" "$out"
+
 # ─── 9. Log rotation: _rotate_if_large ───────────────────────────────────────
 echo ""
 echo "=== _rotate_if_large ==="
@@ -350,6 +374,11 @@ say_line=$(grep -E '^\s+say\)' "$SCRIPT_DIR/ccwatch.sh")
 _assert_match "voice: say uses -- flag" 'say -- ' "$say_line"
 espeak_line=$(grep -E '^\s+espeak-ng\)' "$SCRIPT_DIR/ccwatch.sh")
 _assert_match "voice: espeak-ng uses -- flag" 'espeak-ng -- ' "$espeak_line"
+
+# Fallback JSON shape: verify _analyze fallback and _ls_analyze fallback have required fields
+_fallback='{"status":"error","waiting_for_user":false,"pending_question":null,"pending_permission":null,"branch":"?","task_summary":"API error","current_action":"","files":[],"cognitive_load":{"score":1,"label":"?","reasoning":"","safe_to_switch_away":true,"context_cost":""},"suggested_action":""}'
+_assert_eq "fallback has .status" "error" "$(jq -r '.status' <<< "$_fallback")"
+_assert_eq "fallback has .cognitive_load.score" "1" "$(jq -r '.cognitive_load.score' <<< "$_fallback")"
 
 # mktemp failure guards: verify all mktemp calls have || guards
 mktemp_unguarded=$(grep -n 'mktemp ' "$SCRIPT_DIR/ccwatch.sh" | grep -v '||' | grep -v '^#' || true)

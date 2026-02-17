@@ -523,7 +523,15 @@ _ls_analyze() {
     ( _analyze "$(_cap "$pid")" "$lbl" "$h" > "$_adir/$i" ) &
   done
   wait
-  for i in "${!_LS_S[@]}"; do _LS_A+=("$(cat "$_adir/$i")"); done
+  local _fallback='{"status":"error","waiting_for_user":false,"pending_question":null,"pending_permission":null,"branch":"?","task_summary":"API error","current_action":"","files":[],"cognitive_load":{"score":1,"label":"?","reasoning":"","safe_to_switch_away":true,"context_cost":""},"suggested_action":""}'
+  for i in "${!_LS_S[@]}"; do
+    local result; result=$(cat "$_adir/$i" 2>/dev/null)
+    if [[ -z "$result" ]] || ! jq -e '.status' <<< "$result" &>/dev/null; then
+      _LS_A+=("$_fallback")
+    else
+      _LS_A+=("$result")
+    fi
+  done
 }
 
 _ls_render_session() {
@@ -674,10 +682,15 @@ _cmd_suggest() {
     ( _analyze "$(_cap "$pid")" "$lbl" "" > "$_adir/$i" ) &
   done
   wait
+  local _fallback='{"status":"error","task_summary":"API error","cognitive_load":{"score":1}}'
   local all=""
   for i in "${!S[@]}"; do
     local lbl; IFS='|' read -r _ lbl <<< "${S[$i]}"
-    all+="\n--- ${lbl} ---\n$(cat "$_adir/$i")\n"
+    local result; result=$(cat "$_adir/$i" 2>/dev/null)
+    if [[ -z "$result" ]] || ! jq -e '.status' <<< "$result" &>/dev/null; then
+      result="$_fallback"
+    fi
+    all+="\n--- ${lbl} ---\n${result}\n"
   done
   local r; r=$(_call "think" \
     'Developer workflow advisor. Given session analyses + history, provide:
