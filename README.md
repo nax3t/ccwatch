@@ -5,8 +5,8 @@ Ambient intelligence for Claude Code sessions in tmux.
 One status bar line. Three keybindings. No TUI to manage.
 
 ```
-●4 ?1 !2 ▰▰▱▱▱ │ 14:32     ← always visible, $0
-prefix+A                       ← full analysis on demand, ~$0.01
+cc:4 ?1 !2 ==--- | 14:32     <- always visible, $0
+prefix+A                       <- full analysis on demand, ~$0.01
 ```
 
 ## Install
@@ -57,13 +57,13 @@ The daemon never calls the API. The AI layer only fires when you press a key.
 
 ### Status bar (always visible)
 ```
-●4 ?1 !2 ▰▰▱▱▱ P47 │ 14:32
-│  │  │  │         │
-│  │  │  │         └─ 47 permissions logged (run ccwatch permissions)
-│  │  │  └─ load bar (green/yellow/red)
-│  │  └─ 2 permission prompts waiting
-│  └─ 1 question waiting
-└─ 4 sessions (green=clear, yellow=needs attention)
+cc:4 ?1 !2 ==--- P47 | 14:32
+ |   |  |  |      |
+ |   |  |  |      +-- 47 permissions logged (run ccwatch permissions)
+ |   |  |  +-- load bar (2 of 4 sessions active)
+ |   |  +-- 2 permission prompts waiting
+ |   +-- 1 question waiting
+ +-- 4 sessions (bold = needs attention)
 ```
 
 ### Keybindings
@@ -95,11 +95,11 @@ Each session gets rated 1-5 by Sonnet:
 
 | Score | Label | Switch away? |
 |---|---|---|
-| ▰▱▱▱▱ | trivial | freely |
-| ▰▰▱▱▱ | low | easy resume |
-| ▰▰▰▱▱ | medium | some context needed |
-| ▰▰▰▰▱ | high | significant context loss |
-| ▰▰▰▰▰ | intense | full attention required |
+| `=----` | trivial | freely |
+| `==---` | low | easy resume |
+| `===--` | medium | some context needed |
+| `====-` | high | significant context loss |
+| `=====` | intense | full attention required |
 
 Sessions are sorted low→high so quick check-ins appear first. The `ls` footer recommends which session to focus next (permissions > questions > errors).
 
@@ -127,22 +127,22 @@ Uses local TTS only (Piper, say, espeak-ng) — no API calls for voice.
 ## Architecture
 
 ```
-tmux status bar ← ●4 ?1 !2 ▰▰▱▱▱    (daemon writes tmux vars)
-                      │
-         ┌────────────┴────────────┐
-         │    daemon (background)   │
-         │  • regex pane scanning   │   ← $0, every 30s
-         │  • permission logging    │
-         │  • bell/voice on waiting │
-         │  • NO api calls          │
-         └────────────┬────────────┘
-                      │
-         ┌────────────┴────────────┐
-         │   AI layer (on demand)   │
-         │  • Sonnet: analysis,     │   ← ~$0.01/call
-         │    suggestions, perms    │
-         │  • triggered by keypress │
-         └─────────────────────────┘
+tmux status bar  <--  cc:4 ?1 !2 ==---    (daemon writes tmux vars)
+                          |
+            +-------------+-------------+
+            |    daemon (background)     |
+            |  - regex pane scanning     |   <- $0, every 30s
+            |  - permission logging      |
+            |  - bell/voice on waiting   |
+            |  - NO api calls            |
+            +-------------+-------------+
+                          |
+            +-------------+-------------+
+            |   AI layer (on demand)     |
+            |  - Sonnet: analysis,       |   <- ~$0.01/call
+            |    suggestions, perms      |
+            |  - triggered by keypress   |
+            +---------------------------+
 ```
 
 ## Config
