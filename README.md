@@ -2,11 +2,11 @@
 
 Ambient intelligence for Claude Code sessions in tmux.
 
-One status bar line. Three keybindings. No TUI to manage.
+One status bar line, always visible. Three keybindings. No TUI to manage.
 
 ![status bar](assets/statusbar.png)
 
-Always visible, $0. Press `prefix+A` for full AI analysis (~$0.01).
+Press `prefix+A` for full AI analysis (~$0.01).
 
 ## Install
 
