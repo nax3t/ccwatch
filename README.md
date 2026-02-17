@@ -2,7 +2,7 @@
 
 Ambient intelligence for Claude Code sessions in tmux.
 
-One status bar line. Four keybindings. No TUI to manage.
+One status bar line. Three keybindings. No TUI to manage.
 
 ```
 ●4 ?1 !2 ▰▰▱▱▱ │ 14:32     ← always visible, $0
@@ -36,8 +36,10 @@ tmux source ~/.tmux.conf
 
 - `tmux` (3.3+ recommended for popups)
 - `curl`, `jq`
+- `pstree` (optional but recommended for session detection)
 - `ANTHROPIC_API_KEY` — this uses the API, **not** your Max/Pro subscription
   - Get one: https://console.anthropic.com/settings/keys
+  - Store it: `ccwatch key set` (macOS Keychain) or `export ANTHROPIC_API_KEY=sk-ant-...`
   - Cost: ~$0.10-0.50/day with heavy use
 
 ## How It Works
@@ -47,7 +49,7 @@ tmux source ~/.tmux.conf
 | Layer | What | Cost | When |
 |---|---|---|---|
 | **Daemon** | Scans panes every 30s via regex. Updates tmux status bar. Logs permission requests. Sends bell on blocked sessions. | $0 | Always |
-| **AI popups** | Haiku/Sonnet analysis triggered by keypress. Cognitive load scoring, workflow suggestions, permission aggregation. | ~$0.01/call | When you ask |
+| **AI popups** | Sonnet analysis triggered by keypress. Cognitive load scoring, permission aggregation. | ~$0.01/call | When you ask |
 
 The daemon never calls the API. The AI layer only fires when you press a key.
 
@@ -69,20 +71,21 @@ The daemon never calls the API. The AI layer only fires when you press a key.
 |---|---|---|
 | `prefix + S` | Status of current pane | Sonnet |
 | `prefix + A` | All sessions, sorted by cognitive load | Sonnet |
-| `prefix + G` | "What should I do next?" | Sonnet |
 | `prefix + P` | Permission analysis → settings.json | Sonnet |
 
 ### CLI
 ```bash
-ccwatch              # quick glance (no API)
-ccwatch ls           # full AI analysis
+ccwatch              # quick glance — shows which sessions need what (no API)
+ccwatch ls           # full AI analysis, sorted by cognitive load
 ccwatch status       # deep dive current pane
 ccwatch status 0:1.0 # deep dive specific pane
-ccwatch suggest      # workflow advice
 ccwatch permissions  # analyze logged perms → settings.json suggestions
 ccwatch permissions --apply user     # apply to ~/.claude/settings.json
 ccwatch permissions --apply project  # apply to .claude/settings.json
 ccwatch permissions --reset          # clear logs
+ccwatch voice on|off # toggle voice narration
+ccwatch key          # API key status
+ccwatch key set      # store key in macOS Keychain
 ccwatch daemon start/stop/status
 ```
 
@@ -98,7 +101,7 @@ Each session gets rated 1-5 by Sonnet:
 | ▰▰▰▰▱ | high | significant context loss |
 | ▰▰▰▰▰ | intense | full attention required |
 
-Sessions are sorted low→high so quick check-ins appear first.
+Sessions are sorted low→high so quick check-ins appear first. The `ls` footer recommends which session to focus next (permissions > questions > errors).
 
 ## Permission Aggregation
 
@@ -107,14 +110,15 @@ request it sees across all sessions. When you run `ccwatch permissions`:
 
 1. Aggregates patterns ("Bash(npm test) asked 47x across 3 sessions")
 2. Sonnet generates the narrowest `settings.json` rules to cover them
-3. `ccwatch permissions --apply user` merges into `~/.claude/settings.json`
-4. Permissions stop coming up. One-time fix.
+3. Dangerous patterns like `Bash(*)` or `Bash(sudo ...)` are rejected automatically
+4. `ccwatch permissions --apply user` merges into `~/.claude/settings.json`
+5. Permissions stop coming up. One-time fix.
 
 ## Voice (Optional)
 
 ```bash
-ccwatch voice-setup         # check what's available
-export CCWATCH_VOICE=true   # enable
+ccwatch voice on    # enable
+ccwatch voice off   # disable
 ```
 
 When enabled, the daemon speaks alerts when sessions transition to waiting.
@@ -135,7 +139,6 @@ tmux status bar ← ●4 ?1 !2 ▰▰▱▱▱    (daemon writes tmux vars)
                       │
          ┌────────────┴────────────┐
          │   AI layer (on demand)   │
-         │  • Haiku: fast scans     │   ← ~$0.001/call
          │  • Sonnet: analysis,     │   ← ~$0.01/call
          │    suggestions, perms    │
          │  • triggered by keypress │
@@ -148,7 +151,7 @@ tmux status bar ← ●4 ?1 !2 ▰▰▱▱▱    (daemon writes tmux vars)
 |---|---|---|
 | `ANTHROPIC_API_KEY` | (required) | API key |
 | `CCWATCH_MODEL_FAST` | `claude-haiku-4-5-20251001` | Fast tier |
-| `CCWATCH_MODEL_THINK` | `claude-sonnet-4-5-20250929` | Think tier (ls, status, suggest, permissions) |
+| `CCWATCH_MODEL_THINK` | `claude-sonnet-4-5-20250929` | Think tier (ls, status, permissions) |
 | `CCWATCH_MODEL` | (none) | Override: force one model for everything |
 | `CCWATCH_VOICE` | `false` | Enable voice alerts |
 | `CCWATCH_SCAN_INTERVAL` | `30` | Daemon scan interval (seconds) |
@@ -156,5 +159,5 @@ tmux status bar ← ●4 ?1 !2 ▰▰▱▱▱    (daemon writes tmux vars)
 
 ## Single file
 
-ccwatch is one 642-line bash script. No build step, no compile, no node_modules.
+ccwatch is one bash script (~1100 lines). No build step, no compile, no node_modules.
 Fork it, hack it, extend it.
