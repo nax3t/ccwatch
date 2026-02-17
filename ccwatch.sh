@@ -289,21 +289,22 @@ _daemon_start() {
   fi
 
   (
-    # Write PID atomically — use $BASHPID for the actual subshell PID
-    local tmp_pid; tmp_pid=$(mktemp "$CACHE/pid.XXXXXX")
-    echo "$BASHPID" > "$tmp_pid"
-    mv "$tmp_pid" "$DAEMON_PID"
-    # Release startup lock now that PID file is written
-    rmdir "$lockdir" 2>/dev/null || true
-
     trap 'rm -f "$DAEMON_PID"; exit 0' INT TERM HUP
-    _log "daemon start pid=$BASHPID interval=${SCAN_INT}s"
     while true; do _daemon_scan 2>/dev/null || true; sleep "$SCAN_INT"; done
   ) &
+  local child_pid=$!
   disown
-  sleep 0.3  # Brief wait so PID file is written before we read it
-  rmdir "$lockdir" 2>/dev/null || true  # Safety: clean up if subshell hasn't yet
-  echo "Daemon started (PID $(cat "$DAEMON_PID" 2>/dev/null || echo '?'), every ${SCAN_INT}s)"
+
+  # Write PID from parent — $! is the correct subshell PID (portable, no BASHPID needed)
+  local tmp_pid; tmp_pid=$(mktemp "$CACHE/pid.XXXXXX")
+  echo "$child_pid" > "$tmp_pid"
+  mv "$tmp_pid" "$DAEMON_PID"
+
+  # Release startup lock
+  rmdir "$lockdir" 2>/dev/null || true
+
+  _log "daemon start pid=$child_pid interval=${SCAN_INT}s"
+  echo "Daemon started (PID $child_pid, every ${SCAN_INT}s)"
 }
 
 _daemon_stop() {
@@ -402,6 +403,7 @@ _cmd_default() {
   [[ "$p" -gt 0 ]] && echo -e "  ${CY}🔑 ${p} permission(s)${R}"
   [[ "$e" -gt 0 ]] && echo -e "  ${CR}✖ ${e} error(s)${R}"
   [[ "$pl" -gt 10 ]] && echo -e "  ${CM}📋 ${pl} perms → ccwatch permissions${R}"
+  return 0
 }
 
 # ─── CMD: ls ──────────────────────────────────────────────────────────────────
