@@ -1010,8 +1010,9 @@ case "${1:-}" in
   --statusbar) _statusbar ;;
   --popup) shift
     # Wrapper for tmux display-popup: runs subcommand in bash, then waits for keypress.
-    # Needed because tmux popups use the default shell (often zsh), where
-    # bash-specific `read -rsn1` is invalid.
+    # EXIT trap ensures popup stays open for reading even if set -e kills the script
+    # (e.g. API failure, jq parse error, missing key).
+    trap 'echo ""; read -rsn1 -p $'"'"'↵ '"'"'' EXIT
     case "${1:-}" in
       status|s) _cmd_status "${2:-}" ;;
       ls|list) _cmd_ls ;;
@@ -1019,7 +1020,6 @@ case "${1:-}" in
       permissions|perm) shift; case "${1:-}" in
         --apply) _cmd_perms_apply "${2:-user}" ;; --reset) _cmd_perms_reset ;; *) _cmd_perms ;; esac ;;
     esac
-    echo ""; read -rsn1 -p $'↵ '
     ;;
   key|k) _cmd_key "${2:-}" ;;
   voice|v) _cmd_voice "${2:-}" ;;
