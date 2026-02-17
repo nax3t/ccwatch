@@ -51,6 +51,10 @@ CR="\033[31m"; CG="\033[32m"; CY="\033[33m"; CB="\033[34m"
 CM="\033[35m"; CC="\033[36m"; CW="\033[37m"
 BR="\033[41m"; BY="\033[43m"; BC="\033[46m"
 
+# [HARDENED #17] Sanitize untrusted strings for echo -e display
+# Doubles backslashes so \033, \n, etc. from API/state data are shown literally
+_e() { printf '%s' "${1//\\/\\\\}"; }
+
 # ─── Util ─────────────────────────────────────────────────────────────────────
 
 # [HARDENED #7] Log rotation
@@ -180,8 +184,10 @@ _call() {
 
   local resp
   # [HARDENED #4] Pass API key via stdin curl config to hide from ps
-  # Escape backslashes and double quotes for curl config format
-  local escaped_key="${ANTHROPIC_API_KEY//\\/\\\\}"
+  # [HARDENED #16] Strip control chars (newlines could inject curl config directives)
+  local escaped_key="${ANTHROPIC_API_KEY}"
+  escaped_key="${escaped_key//$'\n'/}"; escaped_key="${escaped_key//$'\r'/}"
+  escaped_key="${escaped_key//\\/\\\\}"
   escaped_key="${escaped_key//\"/\\\"}"
   resp=$(printf 'header = "x-api-key: %s"\n' "$escaped_key" | \
     curl -s --max-time 30 -K - \
@@ -470,8 +476,8 @@ _cmd_default() {
     local _sl _ss _sd
     IFS=$'\t' read -r _sl _ss _sd <<< "$_line"
     case "$_ss" in
-      permission) echo -e "  ${CY}🔑 ${_sl}${R} ${D}— ${_sd}${R}" ;;
-      question)   echo -e "  ${CC}❓ ${_sl}${R} ${D}— ${_sd:0:80}${R}" ;;
+      permission) echo -e "  ${CY}🔑 ${_sl}${R} ${D}— $(_e "$_sd")${R}" ;;
+      question)   echo -e "  ${CC}❓ ${_sl}${R} ${D}— $(_e "${_sd:0:80}")${R}" ;;
       error)      echo -e "  ${CR}✖ ${_sl}${R}" ;;
     esac
   done < <(jq -r '.sessions[]? | [.label,.state,.detail] | @tsv' "$DAEMON_STATE" 2>/dev/null)
@@ -538,10 +544,10 @@ _ls_render_session() {
   [[ "$first" -ne 1 ]] && echo -e "  ${D}──────────────────────────────────────────────────────────────${R}"
 
   local sw; if [[ "$ss" == "true" ]]; then sw="${CG}↔${R}"; else sw="${CY}⚠${R}"; fi
-  echo -e "  $(_sbadge "$st") ${B}${lbl}${R}  ${D}[${br}]${R}  $(_cbar "$cs" "$cl")  $sw"
-  echo -e "  ${D}│${R} ${ts}"
-  echo -e "  ${D}│${R} ${D}↳ ${na}${R}"
-  [[ -n "$sa" ]] && echo -e "  ${D}│${R} ${CC}→ ${sa}${R}"
+  echo -e "  $(_sbadge "$st") ${B}${lbl}${R}  ${D}[$(_e "$br")]${R}  $(_cbar "$cs" "$cl")  $sw"
+  echo -e "  ${D}│${R} $(_e "$ts")"
+  echo -e "  ${D}│${R} ${D}↳ $(_e "$na")${R}"
+  [[ -n "$sa" ]] && echo -e "  ${D}│${R} ${CC}→ $(_e "$sa")${R}"
 
   local qq tn pd _af
   _af=$(jq -r '[(.pending_question//"null"),
@@ -549,10 +555,10 @@ _ls_render_session() {
   ]|join("\t")' <<< "$a" 2>/dev/null) || true
   IFS=$'\t' read -r qq tn pd <<< "$_af"
   if [[ "$qq" != "null" ]] && [[ -n "$qq" ]]; then
-    echo -e "  ${D}│${R} ${BC}${CW} ❓ ${R} ${CC}${qq}${R}"; _ls_pn=$((_ls_pn+1))
+    echo -e "  ${D}│${R} ${BC}${CW} ❓ ${R} ${CC}$(_e "$qq")${R}"; _ls_pn=$((_ls_pn+1))
   fi
   if [[ "$tn" != "null" ]] && [[ -n "$tn" ]]; then
-    echo -e "  ${D}│${R} ${BY}${CW} 🔑 ${R} ${CY}${tn}(${pd})${R}"
+    echo -e "  ${D}│${R} ${BY}${CW} 🔑 ${R} ${CY}$(_e "$tn")($(_e "$pd"))${R}"
     _ls_pn=$((_ls_pn+1))
   fi
 
@@ -581,7 +587,7 @@ _ls_footer_and_voice() {
   echo -e "  ${D}──────────────────────────────────────────────────────────────${R}"
   [[ $_ls_pn -gt 0 ]] && echo -e "  ${CY}${B}⚡ ${_ls_pn} need attention${R}"
   [[ ${#_ls_lo[@]} -gt 0 ]] && echo -e "  ${D}💡 Quick switch: ${_ls_lo[*]}${R}"
-  [[ ${_ls_focus_pri:-0} -gt 0 ]] && echo -e "  ${CC}→ Focus next: ${_ls_focus_lbl} (${_ls_focus_desc})${R}"
+  [[ ${_ls_focus_pri:-0} -gt 0 ]] && echo -e "  ${CC}→ Focus next: ${_ls_focus_lbl} ($(_e "$_ls_focus_desc"))${R}"
   echo ""
   if _voice_enabled; then
     local vmsg
@@ -646,15 +652,15 @@ _cmd_status() {
   IFS=$'\t' read -r st br cs cl cr cc sa ts na f qq pp_tool pp_detail pp_desc <<< "$_sf"
 
   echo ""
-  echo -e "  $(_sbadge "$st") ${B}${l}${R} ${D}[${br}]${R}"
-  echo -e "  $(_cbar "$cs" "$cl")"; echo -e "  ${D}${cr}${R}"
-  [[ -n "$cc" ]] && echo -e "  ${D}Switch cost: ${cc}${R}"
-  echo ""; echo -e "  ${B}Task:${R}  ${ts}"
-  echo -e "  ${B}Now:${R}   ${na}"
-  [[ -n "$f" ]] && echo -e "  ${B}Files:${R} ${f}"
-  [[ -n "$sa" ]] && echo -e "  ${B}Next:${R}  ${CC}${sa}${R}"
-  [[ "$qq" != "null" ]] && { echo ""; echo -e "  ${BC}${CW} ❓ ${R} ${CC}${qq}${R}"; }
-  [[ "$pp_tool" != "null" ]] && { echo ""; echo -e "  ${BY}${CW} 🔑 ${R} ${CY}${pp_tool}(${pp_detail}): ${pp_desc}${R}"; }
+  echo -e "  $(_sbadge "$st") ${B}${l}${R} ${D}[$(_e "$br")]${R}"
+  echo -e "  $(_cbar "$cs" "$cl")"; echo -e "  ${D}$(_e "$cr")${R}"
+  [[ -n "$cc" ]] && echo -e "  ${D}Switch cost: $(_e "$cc")${R}"
+  echo ""; echo -e "  ${B}Task:${R}  $(_e "$ts")"
+  echo -e "  ${B}Now:${R}   $(_e "$na")"
+  [[ -n "$f" ]] && echo -e "  ${B}Files:${R} $(_e "$f")"
+  [[ -n "$sa" ]] && echo -e "  ${B}Next:${R}  ${CC}$(_e "$sa")${R}"
+  [[ "$qq" != "null" ]] && { echo ""; echo -e "  ${BC}${CW} ❓ ${R} ${CC}$(_e "$qq")${R}"; }
+  [[ "$pp_tool" != "null" ]] && { echo ""; echo -e "  ${BY}${CW} 🔑 ${R} ${CY}$(_e "$pp_tool")($(_e "$pp_detail")): $(_e "$pp_desc")${R}"; }
   if _voice_enabled; then
     local vmsg="Session ${l} on branch ${br}. Status is ${st}, with ${cl} cognitive load."
     vmsg+=" Task: ${ts}. Currently: ${na}."
@@ -693,8 +699,12 @@ Output JSON only (no fences):
 {"global":{"description":"~/.claude/settings.json","permissions":{"allow":[]}},"project":{"description":".claude/settings.json","permissions":{"allow":[]}},"summary":"1-2 sentences","warnings":[]}' \
     "Requests:\n$agg\n\nCurrent settings:\n$cur" 500) || { echo "API error"; return 1; }
 
-  echo "$r" > "$CACHE/perm-suggestions.json"
-  chmod 600 "$CACHE/perm-suggestions.json"
+  # [HARDENED #19] Atomic write via temp + rename (consistent with other file writes)
+  local tmp_sug
+  tmp_sug=$(mktemp "$CACHE/perm-sug.XXXXXX") || { echo "ERROR: mktemp failed"; return 1; }
+  chmod 600 "$tmp_sug"
+  echo "$r" > "$tmp_sug"
+  mv "$tmp_sug" "$CACHE/perm-suggestions.json"
   local sum; sum=$(echo "$r" | jq -r '.summary // ""' 2>/dev/null)
   echo ""
   echo -e "  ${B}Global (~/.claude/settings.json):${R}"
@@ -726,6 +736,15 @@ _cmd_perms_apply() {
   # [HARDENED] Validate the rules are well-formed JSON with expected structure
   if ! echo "$rules" | jq -e '.allow // empty | type == "array"' &>/dev/null; then
     echo "ERROR: Malformed permission rules. Aborting."; return 1
+  fi
+
+  # [HARDENED #18] Reject dangerous permission patterns from AI suggestions
+  local _dangerous
+  _dangerous=$(echo "$rules" | jq -r '.allow[]? // empty' 2>/dev/null | grep -E '^\w+\(\*\)$|^Bash\((sudo|rm -rf|chmod 777|curl.*\|.*sh)' || true)
+  if [[ -n "$_dangerous" ]]; then
+    echo -e "${CR}ERROR: Dangerous permission patterns detected — aborting:${R}"
+    echo "$_dangerous" | while IFS= read -r d; do echo -e "  ${CR}✖ ${d}${R}"; done
+    return 1
   fi
 
   echo -e "${B}Adding to ${tf}:${R}"; echo "$rules" | jq .; echo ""
