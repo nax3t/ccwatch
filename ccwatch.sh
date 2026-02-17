@@ -535,6 +535,7 @@ _ls_analyze() {
 }
 
 _ls_render_session() {
+  # Mutates caller vars: _ls_lo[], _ls_pn, _ls_vw, _ls_vwt, _ls_vi, _ls_ve, _ls_vd
   local idx="$1" first="$2"
   local pid lbl; IFS='|' read -r pid lbl <<< "${_LS_S[$idx]}"
   local a="${_LS_A[$idx]}" pos="${_LS_P[$idx]}"
@@ -937,6 +938,17 @@ _cmd_setup() {
   fi
 
   _daemon_start
+  sleep 1
+  if [[ -f "$DAEMON_PID" ]]; then
+    local dp; dp=$(cat "$DAEMON_PID")
+    if [[ "$dp" =~ ^[0-9]+$ ]] && kill -0 "$dp" 2>/dev/null; then
+      echo -e "${CG}Daemon verified (PID $dp)${R}"
+    else
+      echo -e "${CY}Warning: Daemon may not have started. Run: ccwatch daemon status${R}"
+    fi
+  else
+    echo -e "${CY}Warning: Daemon PID file not found. Run: ccwatch daemon status${R}"
+  fi
 
   echo ""
   echo -e "${B}Session persistence:${R}"
@@ -974,10 +986,10 @@ set -g status-interval 30
 run-shell -b "bash '${me_escaped}' daemon start"
 
 # Keybindings
-bind-key S display-popup -w 78 -h 30 -E "bash '${me_escaped}' --popup status"
-bind-key A display-popup -w 92 -h 40 -E "bash '${me_escaped}' --popup ls"
-bind-key G display-popup -w 82 -h 25 -E "bash '${me_escaped}' --popup suggest"
-bind-key P display-popup -w 86 -h 30 -E "bash '${me_escaped}' --popup permissions"
+bind-key S display-popup -E "bash '${me_escaped}' --popup status"
+bind-key A display-popup -E "bash '${me_escaped}' --popup ls"
+bind-key G display-popup -E "bash '${me_escaped}' --popup suggest"
+bind-key P display-popup -E "bash '${me_escaped}' --popup permissions"
 
 # Session persistence (panes + directories survive reboots)
 set -g @plugin 'tmux-plugins/tpm'
@@ -1011,10 +1023,10 @@ TMUX
     fi
   fi
 
-  tmux bind-key S display-popup -w 78 -h 30 -E "bash '${me_escaped}' --popup status" 2>/dev/null || true
-  tmux bind-key A display-popup -w 92 -h 40 -E "bash '${me_escaped}' --popup ls" 2>/dev/null || true
-  tmux bind-key G display-popup -w 82 -h 25 -E "bash '${me_escaped}' --popup suggest" 2>/dev/null || true
-  tmux bind-key P display-popup -w 86 -h 30 -E "bash '${me_escaped}' --popup permissions" 2>/dev/null || true
+  tmux bind-key S display-popup -E "bash '${me_escaped}' --popup status" 2>/dev/null || true
+  tmux bind-key A display-popup -E "bash '${me_escaped}' --popup ls" 2>/dev/null || true
+  tmux bind-key G display-popup -E "bash '${me_escaped}' --popup suggest" 2>/dev/null || true
+  tmux bind-key P display-popup -E "bash '${me_escaped}' --popup permissions" 2>/dev/null || true
 
   echo ""
   echo -e "${B}${CC}╭──────────────────────────────────────────────╮${R}"
