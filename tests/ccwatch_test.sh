@@ -97,7 +97,7 @@ _extract_fn() {
 
 # Extract and eval each function we need to test
 for fn in _validate_model _validate_pane_id _check_api _check_deps \
-          _detect _pane_pos _sbadge _cbar _read_state _statusbar _rotate_if_large \
+          _detect _sbadge _cbar _read_state _statusbar _rotate_if_large \
           _voice_enabled _voice_alert _voice_summary _log _log_permission _resolve_api_key; do
   eval "$(_extract_fn "$fn")"
 done
@@ -212,28 +212,7 @@ out=$(_detect "$noq_input")
 [[ "$out" != question* ]]
 _assert_eq "no question without trailing ?" "0" "$?"
 
-# ─── 6. Pane position: _pane_pos ────────────────────────────────────────────
-echo ""
-echo "=== _pane_pos ==="
-
-# Override tmux per-call to return geometry strings
-# Format: pane_top|pane_left|pane_width|pane_height|window_width|window_height
-
-_test_pane_pos() {
-  local geo="$1"
-  tmux() { echo "$geo"; }
-  _pane_pos "%0"
-  tmux() { :; }
-}
-
-_assert_eq "full pane" "full" "$(_test_pane_pos "0|0|200|50|200|50")"
-_assert_eq "top-left" "top-left" "$(_test_pane_pos "0|0|100|25|200|50")"
-_assert_eq "top-right" "top-right" "$(_test_pane_pos "0|100|100|25|200|50")"
-_assert_eq "bottom-left" "bottom-left" "$(_test_pane_pos "25|0|100|25|200|50")"
-_assert_eq "bottom-right" "bottom-right" "$(_test_pane_pos "25|100|100|25|200|50")"
-_assert_eq "top (hsplit)" "top" "$(_test_pane_pos "0|0|200|25|200|50")"
-
-# ─── 7. Display formatters: _sbadge and _cbar ───────────────────────────────
+# ─── 6. Display formatters: _sbadge and _cbar ───────────────────────────────
 echo ""
 echo "=== _sbadge ==="
 

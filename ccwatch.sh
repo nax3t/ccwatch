@@ -221,38 +221,12 @@ _is_cc() {
     ps -A -o pid= -o ppid= -o comm= 2>/dev/null |
     awk -v p="$pid" 'BEGIN{a[p]=1} a[$2]{a[$1]=1; print $3}'; } |
     grep -qi "claude" && return 0
-  tmux capture-pane -t "$1" -p -S -15 2>/dev/null | \
-    grep -qiE '(claude>|⏺|╭.*─|Tool|Bash\(|Read\(|Write\(|Edit\()' && return 0
   return 1
 }
 
 _cap() {
   _validate_pane_id "$1" || { echo "[invalid]"; return; }
   tmux capture-pane -t "$1" -p -S "-${CAP}" 2>/dev/null || echo "[gone]"
-}
-
-_pane_pos() {
-  # Determine human-readable pane position from geometry
-  local pane_id="$1"
-  local info
-  info=$(tmux display-message -t "$pane_id" -p \
-    '#{pane_top}|#{pane_left}|#{pane_width}|#{pane_height}|#{window_width}|#{window_height}' 2>/dev/null) || { echo ""; return; }
-  local pt pl pw ph ww wh
-  IFS='|' read -r pt pl pw ph ww wh <<< "$info"
-  # Determine vertical position
-  local vpos=""; local hpos=""
-  if [[ "$ph" -ge "$wh" ]] 2>/dev/null; then vpos="full"
-  elif [[ "$pt" -le 1 ]]; then vpos="top"
-  else vpos="bottom"; fi
-  # Determine horizontal position
-  if [[ "$pw" -ge "$ww" ]] 2>/dev/null; then hpos=""
-  elif [[ "$pl" -le 1 ]]; then hpos="left"
-  else hpos="right"; fi
-  # Combine
-  if [[ "$vpos" == "full" ]] && [[ -z "$hpos" ]]; then echo "full"
-  elif [[ "$vpos" == "full" ]]; then echo "$hpos"
-  elif [[ -z "$hpos" ]]; then echo "$vpos"
-  else echo "${vpos}-${hpos}"; fi
 }
 
 _discover() {
@@ -264,8 +238,7 @@ _discover() {
     local label="${sn}:${wi}.${pi}"
     [[ "$label" =~ ^[a-zA-Z0-9:._-]+$ ]] || continue
     if _is_cc "$pid"; then
-      local pos; pos=$(_pane_pos "$pid")
-      echo "${pid}|${label}|${pos}"
+      echo "${pid}|${label}"
     fi
   done < <(tmux list-panes -a -F \
     '#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{pane_pid}|#{pane_title}' 2>/dev/null)
@@ -305,7 +278,7 @@ _daemon_scan() {
   local n=0 w=0 q=0 p=0 e=0
   local scan_tmp
   scan_tmp=$(mktemp "$CACHE/scan.XXXXXX") || { _log "mktemp failed in _daemon_scan"; return; }
-  while IFS='|' read -r pid label _pos; do
+  while IFS='|' read -r pid label; do
     [[ -z "$pid" ]] && continue; n=$((n+1))
     local content; content=$(tmux capture-pane -t "$pid" -p -S -30 2>/dev/null) || { _log "pane $pid gone"; continue; }
     local si st sd; si=$(_detect "$content"); st=${si%%|*}; sd=${si#*|}
@@ -490,29 +463,39 @@ _cmd_default() {
   _read_state
   local n=$_st_n w=$_st_w q=$_st_q p=$_st_p e=$_st_e lb=$_st_lb pl=$_st_pl
   echo -e "${CG}●${R} ${n} sessions  ${lb}"
-  [[ "$q" -gt 0 ]] && echo -e "  ${CC}❓ ${q} question(s)${R}"
-  [[ "$p" -gt 0 ]] && echo -e "  ${CY}🔑 ${p} permission(s)${R}"
-  [[ "$e" -gt 0 ]] && echo -e "  ${CR}✖ ${e} error(s)${R}"
+  # Show per-session details from daemon state
+  local _line
+  while IFS=$'\t' read -r _line; do
+    [[ -z "$_line" ]] && continue
+    local _sl _ss _sd
+    IFS=$'\t' read -r _sl _ss _sd <<< "$_line"
+    case "$_ss" in
+      permission) echo -e "  ${CY}🔑 ${_sl}${R} ${D}— ${_sd}${R}" ;;
+      question)   echo -e "  ${CC}❓ ${_sl}${R} ${D}— ${_sd:0:80}${R}" ;;
+      error)      echo -e "  ${CR}✖ ${_sl}${R}" ;;
+    esac
+  done < <(jq -r '.sessions[]? | [.label,.state,.detail] | @tsv' "$DAEMON_STATE" 2>/dev/null)
   [[ "$pl" -gt 10 ]] && echo -e "  ${CM}📋 ${pl} perms → ccwatch permissions${R}"
-  # Voice narration
-  local vmsg
-  vmsg=$(_voice_summary "$n" "" \
-    "$w" "is waiting" "are waiting" \
-    "$q" "question pending" "questions pending" \
-    "$p" "permission request" "permission requests" \
-    "$e" "error" "errors")
-  [[ "$w" -eq 0 ]] && [[ "$e" -eq 0 ]] && vmsg+=" All sessions running smoothly."
-  _voice_alert "$vmsg"
+  if _voice_enabled; then
+    local vmsg
+    vmsg=$(_voice_summary "$n" "" \
+      "$w" "is waiting" "are waiting" \
+      "$q" "question pending" "questions pending" \
+      "$p" "permission request" "permission requests" \
+      "$e" "error" "errors")
+    [[ "$w" -eq 0 ]] && [[ "$e" -eq 0 ]] && vmsg+=" All sessions running smoothly."
+    _voice_alert "$vmsg"
+  fi
   return 0
 }
 
 # ─── CMD: ls ──────────────────────────────────────────────────────────────────
-# Sub-functions share caller's namespace (_LS_S, _LS_P, _LS_A arrays)
+# Sub-functions share caller's namespace (_LS_S, _LS_A arrays)
 
 _ls_analyze() {
   local h; h=$(_hist 20)
-  while IFS='|' read -r pid lbl pos; do [[ -z "$pid" ]] && continue
-    _LS_S+=("$pid|$lbl"); _LS_P+=("$pos")
+  while IFS='|' read -r pid lbl; do [[ -z "$pid" ]] && continue
+    _LS_S+=("$pid|$lbl")
     _event "$pid" "scan" ""
   done < <(_discover)
   [[ ${#_LS_S[@]} -eq 0 ]] && { echo -e "${D}No Claude Code sessions.${R}"; return 1; }
@@ -537,10 +520,10 @@ _ls_analyze() {
 }
 
 _ls_render_session() {
-  # Mutates caller vars: _ls_lo[], _ls_pn, _ls_vw, _ls_vwt, _ls_vi, _ls_ve, _ls_vd
+  # Mutates caller vars: _ls_lo[], _ls_pn, _ls_vw, _ls_vwt, _ls_vi, _ls_ve, _ls_vd, _ls_focus_*
   local idx="$1" first="$2"
   local pid lbl; IFS='|' read -r pid lbl <<< "${_LS_S[$idx]}"
-  local a="${_LS_A[$idx]}" pos="${_LS_P[$idx]}"
+  local a="${_LS_A[$idx]}"
   local st ts na br cs cl ss sa
   local _sf
   _sf=$(jq -r '[(.status//"?"),(.task_summary//"?"),(.current_action//"?"),
@@ -554,9 +537,8 @@ _ls_render_session() {
 
   [[ "$first" -ne 1 ]] && echo -e "  ${D}──────────────────────────────────────────────────────────────${R}"
 
-  local pos_tag=""; [[ -n "$pos" ]] && pos_tag=" ${D}(${pos})${R}"
   local sw; if [[ "$ss" == "true" ]]; then sw="${CG}↔${R}"; else sw="${CY}⚠${R}"; fi
-  echo -e "  $(_sbadge "$st") ${B}${lbl}${R}${pos_tag}  ${D}[${br}]${R}  $(_cbar "$cs" "$cl")  $sw"
+  echo -e "  $(_sbadge "$st") ${B}${lbl}${R}  ${D}[${br}]${R}  $(_cbar "$cs" "$cl")  $sw"
   echo -e "  ${D}│${R} ${ts}"
   echo -e "  ${D}│${R} ${D}↳ ${na}${R}"
   [[ -n "$sa" ]] && echo -e "  ${D}│${R} ${CC}→ ${sa}${R}"
@@ -571,35 +553,52 @@ _ls_render_session() {
   fi
   if [[ "$tn" != "null" ]] && [[ -n "$tn" ]]; then
     echo -e "  ${D}│${R} ${BY}${CW} 🔑 ${R} ${CY}${tn}(${pd})${R}"
-    _log_permission "$pid" "$lbl" "${tn}(${pd})"
     _ls_pn=$((_ls_pn+1))
   fi
 
-  _ls_vd+=" Session ${lbl}, status ${st}, ${cl} cognitive load. ${ts}. Currently ${na}."
-  [[ "$qq" != "null" ]] && [[ -n "$qq" ]] && _ls_vd+=" Asking: ${qq}"
-  [[ "$tn" != "null" ]] && [[ -n "$tn" ]] && _ls_vd+=" Waiting for permission to use ${tn}."
-  [[ -n "$sa" ]] && _ls_vd+=" Suggested action: ${sa}."
+  # Track "Focus next" candidate: permission(3) > question(2) > error(1), tiebreak by cognitive load
+  local _fpri=0 _fdesc=""
+  if [[ "$tn" != "null" ]] && [[ -n "$tn" ]]; then
+    _fpri=3; _fdesc="permission — ${tn}(${pd})"
+  elif [[ "$qq" != "null" ]] && [[ -n "$qq" ]]; then
+    _fpri=2; _fdesc="question"
+  elif [[ "$st" == "error" ]]; then
+    _fpri=1; _fdesc="error"
+  fi
+  if [[ $_fpri -gt ${_ls_focus_pri:-0} ]] || { [[ $_fpri -eq ${_ls_focus_pri:-0} ]] && [[ $_fpri -gt 0 ]] && [[ "${cs:-0}" -gt "${_ls_focus_cs:-0}" ]]; }; then
+    _ls_focus_lbl="$lbl"; _ls_focus_pri=$_fpri; _ls_focus_desc="$_fdesc"; _ls_focus_cs="${cs:-0}"
+  fi
+
+  if _voice_enabled; then
+    _ls_vd+=" Session ${lbl}, status ${st}, ${cl} cognitive load. ${ts}. Currently ${na}."
+    [[ "$qq" != "null" ]] && [[ -n "$qq" ]] && _ls_vd+=" Asking: ${qq}"
+    [[ "$tn" != "null" ]] && [[ -n "$tn" ]] && _ls_vd+=" Waiting for permission to use ${tn}."
+    [[ -n "$sa" ]] && _ls_vd+=" Suggested action: ${sa}."
+  fi
 }
 
 _ls_footer_and_voice() {
   echo -e "  ${D}──────────────────────────────────────────────────────────────${R}"
   [[ $_ls_pn -gt 0 ]] && echo -e "  ${CY}${B}⚡ ${_ls_pn} need attention${R}"
   [[ ${#_ls_lo[@]} -gt 0 ]] && echo -e "  ${D}💡 Quick switch: ${_ls_lo[*]}${R}"
+  [[ ${_ls_focus_pri:-0} -gt 0 ]] && echo -e "  ${CC}→ Focus next: ${_ls_focus_lbl} (${_ls_focus_desc})${R}"
   echo ""
-  local vmsg
-  vmsg=$(_voice_summary "${#_LS_S[@]}" "sorted by cognitive load" \
-    "$_ls_vw" "is working" "are working" \
-    "$_ls_vi" "is idle" "are idle" \
-    "$_ls_vwt" "is waiting" "are waiting" \
-    "$_ls_ve" "has errors" "have errors" \
-    "$_ls_pn" "session needs attention" "sessions need attention")
-  vmsg+="$_ls_vd"
-  _voice_alert "$vmsg"
+  if _voice_enabled; then
+    local vmsg
+    vmsg=$(_voice_summary "${#_LS_S[@]}" "sorted by cognitive load" \
+      "$_ls_vw" "is working" "are working" \
+      "$_ls_vi" "is idle" "are idle" \
+      "$_ls_vwt" "is waiting" "are waiting" \
+      "$_ls_ve" "has errors" "have errors" \
+      "$_ls_pn" "session needs attention" "sessions need attention")
+    vmsg+="$_ls_vd"
+    _voice_alert "$vmsg"
+  fi
 }
 
 _cmd_ls() {
   _check_deps; _check_api
-  local _LS_S=() _LS_P=() _LS_A=()
+  local _LS_S=() _LS_A=()
   _ls_analyze || return
 
   # Sort by cognitive load (bash insertion sort — 0 forks)
@@ -616,6 +615,7 @@ _cmd_ls() {
   echo -e "  ${B}${CC}🔭 Sessions${R}  ${D}(${#_LS_S[@]} found, sorted by cognitive load)${R}"
   echo -e "  ${D}──────────────────────────────────────────────────────────────${R}"
   local _ls_pn=0 _ls_lo=() _ls_vw=0 _ls_vwt=0 _ls_vi=0 _ls_ve=0 _ls_vd="" first=1
+  local _ls_focus_lbl="" _ls_focus_pri=0 _ls_focus_desc="" _ls_focus_cs=0
   for idx in "${SI[@]}"; do
     _ls_render_session "$idx" "$first"
     first=0
@@ -655,57 +655,17 @@ _cmd_status() {
   [[ -n "$sa" ]] && echo -e "  ${B}Next:${R}  ${CC}${sa}${R}"
   [[ "$qq" != "null" ]] && { echo ""; echo -e "  ${BC}${CW} ❓ ${R} ${CC}${qq}${R}"; }
   [[ "$pp_tool" != "null" ]] && { echo ""; echo -e "  ${BY}${CW} 🔑 ${R} ${CY}${pp_tool}(${pp_detail}): ${pp_desc}${R}"; }
-  # Voice narration — vars already extracted above
-  local vmsg="Session ${l} on branch ${br}. Status is ${st}, with ${cl} cognitive load."
-  vmsg+=" Task: ${ts}. Currently: ${na}."
-  [[ -n "$cr" ]] && vmsg+=" ${cr}."
-  [[ -n "$cc" ]] && vmsg+=" Switch cost: ${cc}."
-  [[ -n "$f" ]] && vmsg+=" Files involved: ${f}."
-  [[ -n "$sa" ]] && vmsg+=" Suggested next step: ${sa}."
-  [[ "$qq" != "null" ]] && vmsg+=" Claude is asking: ${qq}."
-  [[ "$pp_tool" != "null" ]] && vmsg+=" Waiting for permission approval."
-  _voice_alert "$vmsg"
-}
-
-# ─── CMD: suggest ─────────────────────────────────────────────────────────────
-_cmd_suggest() {
-  _check_deps; _check_api
-  local S=() n=0
-  echo -e "${D}Analyzing all sessions...${R}"
-  while IFS='|' read -r pid lbl _pos; do [[ -z "$pid" ]] && continue
-    S+=("$pid|$lbl"); n=$((n+1))
-  done < <(_discover)
-  [[ $n -eq 0 ]] && { echo "No sessions."; return; }
-
-  # Parallel analysis — all API calls run concurrently
-  local _adir; _adir=$(mktemp -d "$CACHE/par.XXXXXX") || { echo "ERROR: mktemp failed"; return 1; }
-  for i in "${!S[@]}"; do
-    local pid lbl; IFS='|' read -r pid lbl <<< "${S[$i]}"
-    ( _analyze "$(_cap "$pid")" "$lbl" "" > "$_adir/$i" ) &
-  done
-  wait
-  local _fallback='{"status":"error","task_summary":"API error","cognitive_load":{"score":1}}'
-  local all=""
-  for i in "${!S[@]}"; do
-    local lbl; IFS='|' read -r _ lbl <<< "${S[$i]}"
-    local result; result=$(cat "$_adir/$i" 2>/dev/null)
-    if [[ -z "$result" ]] || ! jq -e '.status' <<< "$result" &>/dev/null; then
-      result="$_fallback"
-    fi
-    all+="\n--- ${lbl} ---\n${result}\n"
-  done
-  rm -rf "$_adir" 2>/dev/null
-  local r; r=$(_call "think" \
-    'Developer workflow advisor. Given session analyses + history, provide:
-PRIORITY: Which sessions to address first (1 line each, blocked first)
-STRATEGY: 2-3 sentences on optimal switching order by cognitive load.
-BATCH: Group related work. Mark quick check-ins vs deep focus. Be direct.' \
-    "Sessions:\n${all}\n\nHistory:\n$(_hist 30)" 500) || { echo "API error"; return 1; }
-  echo ""; echo -e "${B}${CC}  💡 What to do next${R}"; echo ""
-  echo "$r" | while IFS= read -r line; do echo -e "  $line"; done; echo ""
-  # Voice narration — read the full suggestion
-  local vtip; vtip=$(echo "$r" | tr '\n' ' ')
-  _voice_alert "Here is what to do next. ${vtip}"
+  if _voice_enabled; then
+    local vmsg="Session ${l} on branch ${br}. Status is ${st}, with ${cl} cognitive load."
+    vmsg+=" Task: ${ts}. Currently: ${na}."
+    [[ -n "$cr" ]] && vmsg+=" ${cr}."
+    [[ -n "$cc" ]] && vmsg+=" Switch cost: ${cc}."
+    [[ -n "$f" ]] && vmsg+=" Files involved: ${f}."
+    [[ -n "$sa" ]] && vmsg+=" Suggested next step: ${sa}."
+    [[ "$qq" != "null" ]] && vmsg+=" Claude is asking: ${qq}."
+    [[ "$pp_tool" != "null" ]] && vmsg+=" Waiting for permission approval."
+    _voice_alert "$vmsg"
+  fi
 }
 
 # ─── CMD: permissions ─────────────────────────────────────────────────────────
@@ -990,7 +950,6 @@ run-shell -b "bash '${me_escaped}' daemon start"
 # Keybindings
 bind-key S display-popup -E "bash '${me_escaped}' --popup status"
 bind-key A display-popup -E "bash '${me_escaped}' --popup ls"
-bind-key G display-popup -E "bash '${me_escaped}' --popup suggest"
 bind-key P display-popup -E "bash '${me_escaped}' --popup permissions"
 
 # Session persistence (panes + directories survive reboots)
@@ -1027,7 +986,6 @@ TMUX
 
   tmux bind-key S display-popup -E "bash '${me_escaped}' --popup status" 2>/dev/null || true
   tmux bind-key A display-popup -E "bash '${me_escaped}' --popup ls" 2>/dev/null || true
-  tmux bind-key G display-popup -E "bash '${me_escaped}' --popup suggest" 2>/dev/null || true
   tmux bind-key P display-popup -E "bash '${me_escaped}' --popup permissions" 2>/dev/null || true
 
   echo ""
@@ -1039,15 +997,11 @@ TMUX
   echo -e "    ●4 ?1 !2 ▰▰▱▱▱   ${D}← always visible in tmux${R}"
   echo ""
   echo -e "  ${B}Keybindings${R} (on-demand, ~\$0.01):"
-  echo -e "    prefix+S  status of current pane"
-  echo -e "    prefix+A  list all sessions (cognitive load)"
-  echo -e "    prefix+G  what to do next"
-  echo -e "    prefix+P  permission analysis → settings.json"
+  echo -e "    prefix+S  status     prefix+A  list all     prefix+P  permissions"
   echo ""
   echo -e "  ${B}CLI${R}:"
   echo -e "    ccwatch              quick glance"
   echo -e "    ccwatch ls           full analysis"
-  echo -e "    ccwatch suggest      workflow advice"
   echo -e "    ccwatch permissions  fix your settings.json"
   echo ""
   echo -e "  ${D}Voice: ccwatch voice on${R}"
@@ -1110,7 +1064,6 @@ case "${1:-}" in
   "") _cmd_default ;;
   ls|list) _cmd_ls ;;
   status|s) _cmd_status "${2:-}" ;;
-  suggest|sg) _cmd_suggest ;;
   permissions|perm) shift; case "${1:-}" in
     --apply) _cmd_perms_apply "${2:-user}" ;; --reset) _cmd_perms_reset ;; *) _cmd_perms ;; esac ;;
   daemon|d) shift; case "${1:-status}" in
@@ -1126,12 +1079,11 @@ case "${1:-}" in
       case "${1:-}" in
         status|s) _cmd_status "${2:-}" ;;
         ls|list) _cmd_ls ;;
-        suggest|sg) _cmd_suggest ;;
         permissions|perm) shift; case "${1:-}" in
           --apply) _cmd_perms_apply "${2:-user}" ;; --reset) _cmd_perms_reset ;; *) _cmd_perms ;; esac ;;
       esac
       echo ""
-      echo -e "  ${D}prefix+S status  prefix+A list  prefix+G suggest  prefix+P permissions${R}"
+      echo -e "  ${D}prefix+S status  prefix+A list all  prefix+P permissions${R}"
     ) 2>&1 | less -R -P " q close | ↑↓ scroll | / search"
     ;;
   key|k) _cmd_key "${2:-}" ;;
@@ -1143,7 +1095,6 @@ ccwatch — Ambient Intelligence for Claude Code Sessions
   ccwatch                Quick glance (reads daemon, no API)
   ccwatch ls             Sessions sorted by cognitive load
   ccwatch status [ID]    Deep analysis of one session
-  ccwatch suggest        What to do next (Haiku)
   ccwatch permissions    Permission log → settings.json suggestions
   ccwatch key            API key status (source + partial key)
   ccwatch key set        Store API key in macOS Keychain
@@ -1156,10 +1107,9 @@ Status bar (always visible, $0):
   ●4 ?1 !2 ▰▰▱▱▱ P47
 
 Keybindings (on-demand, ~$0.01/call):
-  prefix+S  status     prefix+A  list all
-  prefix+G  suggest    prefix+P  permissions
+  prefix+S  status     prefix+A  list all     prefix+P  permissions
 
-Models: Haiku (fast tier), Sonnet (think tier: ls, status, suggest, permissions)
+Models: Haiku (fast tier), Sonnet (think tier: ls, status, permissions)
 Cost: ~$0.10-0.50/day with heavy use
 API: Uses ANTHROPIC_API_KEY — resolved from env var or macOS Keychain
 
