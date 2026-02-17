@@ -98,7 +98,7 @@ _extract_fn() {
 # Extract and eval each function we need to test
 for fn in _validate_model _validate_pane_id _check_api _check_deps \
           _detect _pane_pos _sbadge _cbar _statusbar _rotate_if_large \
-          _voice_alert _log; do
+          _voice_enabled _voice_alert _log _resolve_api_key; do
   eval "$(_extract_fn "$fn")"
 done
 
@@ -343,6 +343,75 @@ _cleanup_result=$(
   echo "${leftover:-0}"
 )
 _assert_eq "body_file cleaned up" "0" "$_cleanup_result"
+
+# ─── 11. Voice toggle: _voice_enabled ─────────────────────────────────────────
+echo ""
+echo "=== _voice_enabled ==="
+
+# Neither env var nor file → disabled
+unset CCWATCH_VOICE
+rm -f "$CACHE/voice_enabled"
+_voice_enabled 2>/dev/null
+_assert_eq "disabled by default" "1" "$?"
+
+# Env var → enabled
+CCWATCH_VOICE="true"
+_voice_enabled 2>/dev/null
+_assert_eq "enabled via env var" "0" "$?"
+
+# File toggle → enabled (even without env var)
+unset CCWATCH_VOICE
+touch "$CACHE/voice_enabled"
+_voice_enabled 2>/dev/null
+_assert_eq "enabled via file toggle" "0" "$?"
+
+# File removed → disabled again
+rm -f "$CACHE/voice_enabled"
+_voice_enabled 2>/dev/null
+_assert_eq "disabled after file removed" "1" "$?"
+
+# Restore
+CCWATCH_VOICE="false"
+
+# ─── 12. API key resolution: _resolve_api_key ────────────────────────────────
+echo ""
+echo "=== _resolve_api_key ==="
+
+# Env var set → uses env var (does not call security)
+ANTHROPIC_API_KEY="sk-ant-from-env"
+_resolve_api_key
+_assert_eq "env var set: uses env var" "sk-ant-from-env" "$ANTHROPIC_API_KEY"
+
+# Env var unset + mock security → retrieves from Keychain
+unset ANTHROPIC_API_KEY
+# Mock: override uname and security for this test
+_resolve_api_key_mock_keychain() {
+  unset ANTHROPIC_API_KEY
+  uname() { echo "Darwin"; }
+  security() { echo "sk-ant-from-keychain"; }
+  export -f uname security
+  _resolve_api_key
+  echo "$ANTHROPIC_API_KEY"
+  unset -f uname security
+}
+out=$(_resolve_api_key_mock_keychain)
+_assert_eq "keychain fallback: retrieves key" "sk-ant-from-keychain" "$out"
+
+# Both unset + security fails → key stays empty
+_resolve_api_key_mock_fail() {
+  unset ANTHROPIC_API_KEY
+  uname() { echo "Darwin"; }
+  security() { return 1; }
+  export -f uname security
+  _resolve_api_key
+  echo "${ANTHROPIC_API_KEY:-}"
+  unset -f uname security
+}
+out=$(_resolve_api_key_mock_fail)
+_assert_eq "no key anywhere: stays empty" "" "$out"
+
+# Restore key for remaining tests
+ANTHROPIC_API_KEY="sk-ant-test-key-000000"
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
 _summary

@@ -32,7 +32,7 @@ MAX_LOG_SIZE=5242880  # 5MB
 
 # ─── Models (two-tier: fast + think) ─────────────────────────────────────────
 M_FAST="${CCWATCH_MODEL_FAST:-claude-haiku-4-5-20251001}"
-M_THINK="${CCWATCH_MODEL_THINK:-claude-sonnet-4-5-20250929}"
+M_THINK="${CCWATCH_MODEL_THINK:-claude-haiku-4-5-20251001}"
 M_OVERRIDE="${CCWATCH_MODEL:-}"
 
 # [HARDENED #12] Validate model names — alphanumeric, hyphens, dots only
@@ -89,13 +89,26 @@ _check_api() {
   [[ -n "${ANTHROPIC_API_KEY:-}" ]] || {
     echo "ANTHROPIC_API_KEY not set."
     echo "ccwatch uses the Anthropic API — not your Max/Pro subscription."
-    echo "Get one at https://console.anthropic.com/settings/keys"
+    echo ""
+    echo "  Option 1 (macOS): ccwatch key set"
+    echo "  Option 2:         export ANTHROPIC_API_KEY=sk-ant-..."
+    echo ""
+    echo "Get a key at https://console.anthropic.com/settings/keys"
     exit 1
   }
   if [[ ! "$ANTHROPIC_API_KEY" =~ ^sk-ant- ]]; then
     echo "WARNING: ANTHROPIC_API_KEY doesn't look like a valid key (expected sk-ant-...)." >&2
     echo "  Current value starts with: ${ANTHROPIC_API_KEY:0:10}..." >&2
     echo "  If using macOS Keychain, ensure you use: security find-generic-password -w ..." >&2
+  fi
+}
+
+_resolve_api_key() {
+  # Env var takes priority
+  [[ -n "${ANTHROPIC_API_KEY:-}" ]] && return
+  # macOS Keychain fallback
+  if [[ "$(uname)" == "Darwin" ]] && command -v security &>/dev/null; then
+    ANTHROPIC_API_KEY=$(security find-generic-password -s ccwatch -a anthropic-api-key -w 2>/dev/null) || true
   fi
 }
 
@@ -450,6 +463,13 @@ _cmd_default() {
   [[ "$p" -gt 0 ]] && echo -e "  ${CY}🔑 ${p} permission(s)${R}"
   [[ "$e" -gt 0 ]] && echo -e "  ${CR}✖ ${e} error(s)${R}"
   [[ "$pl" -gt 10 ]] && echo -e "  ${CM}📋 ${pl} perms → ccwatch permissions${R}"
+  # Voice summary
+  local vmsg="${n} sessions."
+  [[ "$w" -gt 0 ]] && vmsg+=" ${w} waiting."
+  [[ "$q" -gt 0 ]] && vmsg+=" ${q} questions."
+  [[ "$p" -gt 0 ]] && vmsg+=" ${p} permissions."
+  [[ "$e" -gt 0 ]] && vmsg+=" ${e} errors."
+  _voice_alert "$vmsg"
   return 0
 }
 
@@ -471,7 +491,7 @@ _cmd_ls() {
   echo ""
   echo -e "  ${B}${CC}🔭 Sessions${R}  ${D}(${#S[@]} found, sorted by cognitive load)${R}"
   echo -e "  ${D}──────────────────────────────────────────────────────────────${R}"
-  local pn=0 lo=() first=1
+  local pn=0 lo=() first=1 v_working=0 v_waiting=0 v_idle=0 v_error=0
   for idx in "${SI[@]}"; do
     local pid lbl; IFS='|' read -r pid lbl <<< "${S[$idx]}"
     local a="${A[$idx]}" pos="${P[$idx]}"
@@ -485,6 +505,8 @@ _cmd_ls() {
     ss=$(echo "$a"|jq -r '.cognitive_load.safe_to_switch_away//false' 2>/dev/null) || ss="false"
     sa=$(echo "$a"|jq -r '.suggested_action//""' 2>/dev/null) || sa=""
     if [[ "$cs" -le 2 ]]; then lo+=("$lbl"); fi
+    case "$st" in working) v_working=$((v_working+1));; waiting) v_waiting=$((v_waiting+1));;
+      idle) v_idle=$((v_idle+1));; error) v_error=$((v_error+1));; esac
 
     if [[ "$first" -ne 1 ]]; then
       echo -e "  ${D}──────────────────────────────────────────────────────────────${R}"
@@ -525,6 +547,14 @@ _cmd_ls() {
   if [[ $pn -gt 0 ]]; then echo -e "  ${CY}${B}⚡ ${pn} need attention${R}"; fi
   if [[ ${#lo[@]} -gt 0 ]]; then echo -e "  ${D}💡 Quick switch: ${lo[*]}${R}"; fi
   echo ""
+  # Voice summary
+  local vmsg="${#S[@]} sessions."
+  [[ $v_working -gt 0 ]] && vmsg+=" ${v_working} working."
+  [[ $v_idle -gt 0 ]] && vmsg+=" ${v_idle} idle."
+  [[ $v_waiting -gt 0 ]] && vmsg+=" ${v_waiting} waiting."
+  [[ $v_error -gt 0 ]] && vmsg+=" ${v_error} with errors."
+  [[ $pn -gt 0 ]] && vmsg+=" ${pn} need attention."
+  _voice_alert "$vmsg"
 }
 
 # ─── CMD: status ──────────────────────────────────────────────────────────────
@@ -552,6 +582,10 @@ _cmd_status() {
   [[ "$qq" != "null" ]] && { echo ""; echo -e "  ${BC}${CW} ❓ ${R} ${CC}${qq}${R}"; }
   local pp; pp=$(echo "$a"|jq -r '.pending_permission//"null"')
   [[ "$pp" != "null" ]] && { echo ""; echo -e "  ${BY}${CW} 🔑 ${R} ${CY}$(echo "$pp"|jq -r '"\(.tool)(\(.detail)): \(.description)"')${R}"; }
+  # Voice summary
+  local vst; vst=$(echo "$a"|jq -r '.status//"unknown"' 2>/dev/null)
+  local vts; vts=$(echo "$a"|jq -r '.task_summary//"unknown"' 2>/dev/null)
+  _voice_alert "${l} is ${vst}. ${cl} cognitive load. ${vts}"
 }
 
 # ─── CMD: suggest ─────────────────────────────────────────────────────────────
@@ -571,6 +605,9 @@ BATCH: Group related work. Mark quick check-ins vs deep focus. Be direct.' \
     "Sessions:\n${all}\n\nHistory:\n$(_hist 30)" 500) || { echo "API error"; return 1; }
   echo ""; echo -e "${B}${CC}  💡 What to do next${R}"; echo ""
   echo "$r" | while IFS= read -r line; do echo -e "  $line"; done; echo ""
+  # Voice: read first 2 lines of suggestion
+  local vtip; vtip=$(echo "$r" | head -2 | tr '\n' ' ')
+  _voice_alert "$vtip"
 }
 
 # ─── CMD: permissions ─────────────────────────────────────────────────────────
@@ -677,8 +714,15 @@ _voice_tts() {
   echo "none"
 }
 
+_voice_enabled() {
+  # Check env var first, then persistent file toggle
+  [[ "${CCWATCH_VOICE:-}" == "true" ]] && return 0
+  [[ -f "$CACHE/voice_enabled" ]] && return 0
+  return 1
+}
+
 _voice_alert() {
-  [[ "${CCWATCH_VOICE:-false}" != "true" ]] && return
+  _voice_enabled || return
   local msg="$1" be; be=$(_voice_tts); [[ "$be" == "none" ]] && return
 
   # [HARDENED #1 #2] Sanitize TTS input — strip ANSI, shell metacharacters,
@@ -705,13 +749,35 @@ _voice_alert() {
   esac
 }
 
-_cmd_voice_setup() {
-  echo -e "${B}Voice Setup${R}"; echo ""
-  local t; t=$(_voice_tts); echo "TTS: $t"
-  [[ "$t" == "none" ]] && {
-    echo "  Install: macOS → built-in 'say' | Linux → sudo apt install espeak-ng"
-    echo "  Fast: pip install piper-tts"; }
-  echo ""; echo "Enable: export CCWATCH_VOICE=true"
+_cmd_voice() {
+  local sub="${1:-}"
+  case "$sub" in
+    on)
+      touch "$CACHE/voice_enabled"
+      local be; be=$(_voice_tts)
+      if [[ "$be" == "none" ]]; then
+        echo -e "${CY}Voice enabled but no TTS backend found.${R}"
+        echo "  macOS: built-in 'say' | Linux: sudo apt install espeak-ng"
+      else
+        echo -e "${CG}Voice on${R} (backend: $be)"
+        _voice_alert "Voice enabled"
+      fi
+      ;;
+    off)
+      rm -f "$CACHE/voice_enabled"
+      echo -e "${D}Voice off${R}"
+      ;;
+    *)
+      local be; be=$(_voice_tts)
+      if _voice_enabled; then echo -e "Voice: ${CG}on${R} (backend: $be)"
+      else echo -e "Voice: ${D}off${R} (backend: $be)"; fi
+      [[ "$be" == "none" ]] && {
+        echo ""; echo "  Install: macOS → built-in 'say' | Linux → sudo apt install espeak-ng"
+        echo "  Fast: pip install piper-tts"; }
+      echo ""; echo "  ccwatch voice on    Enable voice"
+      echo "  ccwatch voice off   Disable voice"
+      ;;
+  esac
 }
 
 # ─── CMD: setup ───────────────────────────────────────────────────────────────
@@ -737,6 +803,7 @@ _cmd_setup() {
   echo -e "${CG}ok${R}"
 
   echo -n "Checking API key... "
+  # _resolve_api_key already ran at entry point (env var → Keychain fallback)
   if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
     echo -e "${CR}not set${R}"
     echo ""
@@ -744,9 +811,16 @@ _cmd_setup() {
     echo "Cost: ~\$0.001/scan (Haiku), ~\$0.01/suggestion (Sonnet)"
     echo ""
     echo "  1. Get a key: https://console.anthropic.com/settings/keys"
-    echo "  2. Add to your shell profile:"
-    echo "     export ANTHROPIC_API_KEY=sk-ant-..."
-    echo "  3. Re-run: ccwatch setup"
+    if [[ "$(uname)" == "Darwin" ]]; then
+      echo "  2. Store in Keychain (recommended):"
+      echo "     ccwatch key set"
+      echo "  3. Or add to your shell profile:"
+      echo "     export ANTHROPIC_API_KEY=sk-ant-..."
+    else
+      echo "  2. Add to your shell profile:"
+      echo "     export ANTHROPIC_API_KEY=sk-ant-..."
+    fi
+    echo "  Re-run: ccwatch setup"
     exit 1
   fi
   echo -e "${CG}ok${R}"
@@ -868,11 +942,62 @@ TMUX
   echo -e "    ccwatch suggest      workflow advice"
   echo -e "    ccwatch permissions  fix your settings.json"
   echo ""
-  echo -e "  ${D}Voice: export CCWATCH_VOICE=true (run 'ccwatch voice-setup' first)${R}"
+  echo -e "  ${D}Voice: ccwatch voice on${R}"
   echo -e "  ${D}Logs:  $CACHE/${R}"
 }
 
+# ─── CMD: key ─────────────────────────────────────────────────────────────────
+_cmd_key() {
+  local sub="${1:-}"
+  case "$sub" in
+    set)
+      if [[ "$(uname)" != "Darwin" ]] || ! command -v security &>/dev/null; then
+        echo "macOS Keychain not available. Use: export ANTHROPIC_API_KEY=sk-ant-..."
+        return 1
+      fi
+      echo -n "Paste your Anthropic API key: "
+      read -rs key; echo ""
+      [[ -z "$key" ]] && { echo "Empty key. Aborted."; return 1; }
+      if ! security add-generic-password -s ccwatch -a anthropic-api-key -w "$key" -U 2>/dev/null; then
+        echo -e "${CR}Failed to store key in Keychain.${R}"
+        return 1
+      fi
+      echo -e "${CG}Key stored in macOS Keychain.${R}"
+      echo -e "${D}Verify: ccwatch key${R}"
+      ;;
+    delete|rm)
+      if security delete-generic-password -s ccwatch -a anthropic-api-key &>/dev/null; then
+        echo -e "${CG}Key removed from Keychain.${R}"
+      else
+        echo "No key found in Keychain."
+      fi
+      ;;
+    *)
+      local src="none" partial=""
+      if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+        src="env"
+        partial="${ANTHROPIC_API_KEY:0:12}...${ANTHROPIC_API_KEY: -4}"
+      elif [[ "$(uname)" == "Darwin" ]] && command -v security &>/dev/null; then
+        local kc_key
+        kc_key=$(security find-generic-password -s ccwatch -a anthropic-api-key -w 2>/dev/null) || true
+        if [[ -n "$kc_key" ]]; then
+          src="keychain"
+          partial="${kc_key:0:12}...${kc_key: -4}"
+        fi
+      fi
+      echo -e "${B}API Key${R}"
+      echo -e "  Source: ${B}${src}${R}"
+      [[ -n "$partial" ]] && echo -e "  Key:    ${D}${partial}${R}"
+      echo ""
+      echo "  ccwatch key set      Store key in macOS Keychain"
+      echo "  ccwatch key delete   Remove key from Keychain"
+      ;;
+  esac
+}
+
 # ─── ENTRY ────────────────────────────────────────────────────────────────────
+_resolve_api_key
+
 case "${1:-}" in
   "") _cmd_default ;;
   ls|list) _cmd_ls ;;
@@ -896,10 +1021,8 @@ case "${1:-}" in
     esac
     echo ""; read -rsn1 -p $'↵ '
     ;;
-  voice|v) _check_deps; _check_api; export CCWATCH_VOICE=true
-    echo "Voice mode — say commands aloud (WIP: install whisper-cpp for STT)"
-    echo "For now, use keybindings. Voice alerts work with: export CCWATCH_VOICE=true" ;;
-  voice-setup|vs) _cmd_voice_setup ;;
+  key|k) _cmd_key "${2:-}" ;;
+  voice|v) _cmd_voice "${2:-}" ;;
   setup) _cmd_setup ;;
   help|--help|-h) cat << 'H'
 ccwatch — Ambient Intelligence for Claude Code Sessions
@@ -907,8 +1030,12 @@ ccwatch — Ambient Intelligence for Claude Code Sessions
   ccwatch                Quick glance (reads daemon, no API)
   ccwatch ls             Sessions sorted by cognitive load
   ccwatch status [ID]    Deep analysis of one session
-  ccwatch suggest        What to do next (Sonnet)
+  ccwatch suggest        What to do next (Haiku)
   ccwatch permissions    Permission log → settings.json suggestions
+  ccwatch key            API key status (source + partial key)
+  ccwatch key set        Store API key in macOS Keychain
+  ccwatch key delete     Remove API key from Keychain
+  ccwatch voice on|off   Toggle voice narration
   ccwatch daemon start   Background scanner (auto-started by setup)
   ccwatch setup          One-time install
 
@@ -919,16 +1046,16 @@ Keybindings (on-demand, ~$0.01/call):
   prefix+S  status     prefix+A  list all
   prefix+G  suggest    prefix+P  permissions
 
-Models: Haiku (fast scans) + Sonnet (analysis/suggestions)
-Cost: ~$0.10-0.50/day with heavy use
-API: Uses ANTHROPIC_API_KEY, not your Max/Pro subscription
+Models: Haiku (all commands by default)
+Cost: ~$0.01-0.10/day with heavy use
+API: Uses ANTHROPIC_API_KEY — resolved from env var or macOS Keychain
 
 Env:
-  ANTHROPIC_API_KEY          Required
+  ANTHROPIC_API_KEY          Required (or use: ccwatch key set)
   CCWATCH_MODEL_FAST         Override Haiku model
-  CCWATCH_MODEL_THINK        Override Sonnet model
+  CCWATCH_MODEL_THINK        Override think-tier model
   CCWATCH_MODEL              Force single model for everything
-  CCWATCH_VOICE=true         Enable voice alerts
+  CCWATCH_VOICE=true         Enable voice (or: ccwatch voice on)
   CCWATCH_SCAN_INTERVAL=30   Daemon scan interval (seconds)
 H
   ;; *) echo "Unknown: $1 — try: ccwatch help" ;;
