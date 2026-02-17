@@ -498,6 +498,7 @@ _cmd_ls() {
   # Parallel analysis — all API calls run concurrently
   echo -e "${D}Analyzing ${#S[@]} session(s)...${R}"
   local _adir; _adir=$(mktemp -d "$CACHE/par.XXXXXX")
+  trap 'rm -rf "$_adir" 2>/dev/null' RETURN
   for i in "${!S[@]}"; do
     local pid lbl; IFS='|' read -r pid lbl <<< "${S[$i]}"
     ( _analyze "$(_cap "$pid")" "$lbl" "$h" > "$_adir/$i" ) &
@@ -783,7 +784,7 @@ _voice_alert() {
   # and anything that could be interpreted by the shell.
   # Only allow: alphanumeric, spaces, periods, commas, hyphens, colons
   msg=$(echo "$msg" | sed 's/\x1b\[[0-9;]*m//g')
-  msg=$(echo "$msg" | tr -cd 'a-zA-Z0-9 .,;:!?()-')
+  msg=$(echo "$msg" | tr -cd 'a-zA-Z0-9 .,:!?()-')
   # Truncate to prevent abuse
   msg="${msg:0:2000}"
   # Reject empty after sanitization

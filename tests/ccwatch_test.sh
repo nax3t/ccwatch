@@ -319,14 +319,14 @@ _assert_eq "cache dir is 700" "700" "$perms"
 # Use printf to create a literal ESC byte (portable across macOS/Linux sed)
 esc=$(printf '\033')
 raw_msg="${esc}[31mHello; rm -rf /${esc}[0m"
-sanitized=$(printf '%s' "$raw_msg" | sed "s/${esc}\[[0-9;]*m//g" | tr -cd 'a-zA-Z0-9 .,;:!?()-')
-# Note: ; is in the tr allowed set, but / and backslash are stripped
-_assert_eq "voice sanitize: slash stripped" "Hello; rm -rf " "$sanitized"
+sanitized=$(printf '%s' "$raw_msg" | sed "s/${esc}\[[0-9;]*m//g" | tr -cd 'a-zA-Z0-9 .,:!?()-')
+# Note: ; and / and backslash are all stripped
+_assert_eq "voice sanitize: semicolon+slash stripped" "Hello rm -rf " "$sanitized"
 # Verify truly dangerous chars are stripped
 raw_danger='$(rm -rf /); `evil`; "quoted"'
-safe=$(printf '%s' "$raw_danger" | tr -cd 'a-zA-Z0-9 .,;:!?()-')
-# () are allowed in the set, but $ ` " \ / are stripped
-_assert_eq "voice sanitize: backticks+dollar stripped" "(rm -rf ); evil; quoted" "$safe"
+safe=$(printf '%s' "$raw_danger" | tr -cd 'a-zA-Z0-9 .,:!?()-')
+# () are allowed in the set, but $ ` " \ / ; are stripped
+_assert_eq "voice sanitize: backticks+dollar+semicolons stripped" "(rm -rf ) evil quoted" "$safe"
 
 # Temp file cleanup: verify RETURN trap pattern cleans up temp files
 # Run in subshell to avoid trap leaking $body_file into outer scope under set -u
