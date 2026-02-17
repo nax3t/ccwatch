@@ -9,7 +9,7 @@
 set -euo pipefail
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
-CCWATCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CCWATCH_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
 CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/ccwatch"
 PERMS_LOG="$CACHE/permissions.jsonl"
 DAEMON_PID="$CACHE/daemon.pid"
@@ -82,7 +82,7 @@ _hist() { tail -n "${1:-20}" "$HISTORY" 2>/dev/null || true; }
 _check_deps() {
   local miss=()
   for c in tmux curl jq; do command -v "$c" &>/dev/null || miss+=("$c"); done
-  [[ ${#miss[@]} -gt 0 ]] && { echo "Missing: ${miss[*]}"; exit 1; }
+  if [[ ${#miss[@]} -gt 0 ]]; then echo "Missing: ${miss[*]}"; exit 1; fi
 }
 
 _check_api() {
@@ -92,6 +92,11 @@ _check_api() {
     echo "Get one at https://console.anthropic.com/settings/keys"
     exit 1
   }
+  if [[ ! "$ANTHROPIC_API_KEY" =~ ^sk-ant- ]]; then
+    echo "WARNING: ANTHROPIC_API_KEY doesn't look like a valid key (expected sk-ant-...)." >&2
+    echo "  Current value starts with: ${ANTHROPIC_API_KEY:0:10}..." >&2
+    echo "  If using macOS Keychain, ensure you use: security find-generic-password -w ..." >&2
+  fi
 }
 
 # [HARDENED #6] Validate pane ID format — must match tmux pane_id pattern
@@ -114,23 +119,22 @@ _call() {
 
   # [HARDENED #4] Build JSON body to a temp file to avoid API key in ps
   # jq --arg safely handles all escaping — no shell injection possible
-  local body_file="" hdr_file=""
-  trap 'rm -f "$body_file" "$hdr_file" 2>/dev/null' RETURN
+  local body_file=""
   body_file=$(mktemp "$CACHE/req.XXXXXX")
+  trap 'rm -f "$body_file" 2>/dev/null' RETURN
   chmod 600 "$body_file"
   jq -n --arg m "$model" --arg s "$sys" --arg c "$usr" --argjson t "$tok" \
     '{model:$m,max_tokens:$t,system:$s,messages:[{role:"user",content:$c}]}' > "$body_file"
 
   local resp
-  # [HARDENED #4] Use config file for headers to hide API key from ps
+  # [HARDENED #4] Pass API key via stdin curl config to hide from ps
   # Escape backslashes and double quotes for curl config format
   local escaped_key="${ANTHROPIC_API_KEY//\\/\\\\}"
   escaped_key="${escaped_key//\"/\\\"}"
-  hdr_file=$(mktemp "$CACHE/hdr.XXXXXX")
-  chmod 600 "$hdr_file"
-  printf -- '-H "x-api-key: %s"\n-H "content-type: application/json"\n-H "anthropic-version: 2023-06-01"\n' \
-    "$escaped_key" > "$hdr_file"
-  resp=$(curl -s --max-time 30 -K "$hdr_file" \
+  resp=$(printf 'header = "x-api-key: %s"\n' "$escaped_key" | \
+    curl -s --max-time 30 -K - \
+    -H "content-type: application/json" \
+    -H "anthropic-version: 2023-06-01" \
     -d @"$body_file" \
     "https://api.anthropic.com/v1/messages" 2>/dev/null) || {
     echo "ERROR: API failed"; return 1
@@ -146,6 +150,8 @@ _call() {
     echo "ERROR: $err_msg"
     return 1
   fi
+  # Strip markdown fences if model wraps JSON in ```json ... ```
+  text=$(echo "$text" | sed '/^```/d')
   echo "$text"
 }
 
@@ -171,6 +177,30 @@ _cap() {
   tmux capture-pane -t "$1" -p -S "-${CAP}" 2>/dev/null || echo "[gone]"
 }
 
+_pane_pos() {
+  # Determine human-readable pane position from geometry
+  local pane_id="$1"
+  local info
+  info=$(tmux display-message -t "$pane_id" -p \
+    '#{pane_top}|#{pane_left}|#{pane_width}|#{pane_height}|#{window_width}|#{window_height}' 2>/dev/null) || { echo ""; return; }
+  local pt pl pw ph ww wh
+  IFS='|' read -r pt pl pw ph ww wh <<< "$info"
+  # Determine vertical position
+  local vpos=""; local hpos=""
+  if [[ "$ph" -ge "$wh" ]] 2>/dev/null; then vpos="full"
+  elif [[ "$pt" -le 1 ]]; then vpos="top"
+  else vpos="bottom"; fi
+  # Determine horizontal position
+  if [[ "$pw" -ge "$ww" ]] 2>/dev/null; then hpos=""
+  elif [[ "$pl" -le 1 ]]; then hpos="left"
+  else hpos="right"; fi
+  # Combine
+  if [[ "$vpos" == "full" ]] && [[ -z "$hpos" ]]; then echo "full"
+  elif [[ "$vpos" == "full" ]]; then echo "$hpos"
+  elif [[ -z "$hpos" ]]; then echo "$vpos"
+  else echo "${vpos}-${hpos}"; fi
+}
+
 _discover() {
   while IFS='|' read -r pid sn wi pi pp pt; do
     [[ -z "$pid" ]] && continue
@@ -179,7 +209,10 @@ _discover() {
     # Sanitize label: alphanumeric, colon, dot, hyphen, underscore only
     local label="${sn}:${wi}.${pi}"
     [[ "$label" =~ ^[a-zA-Z0-9:._-]+$ ]] || continue
-    _is_cc "$pid" && echo "${pid}|${label}"
+    if _is_cc "$pid"; then
+      local pos; pos=$(_pane_pos "$pid")
+      echo "${pid}|${label}|${pos}"
+    fi
   done < <(tmux list-panes -a -F \
     '#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{pane_pid}|#{pane_title}' 2>/dev/null)
 }
@@ -214,7 +247,7 @@ _daemon_scan() {
   local scan_tmp
   scan_tmp=$(mktemp "$CACHE/scan.XXXXXX")
   trap 'rm -f "$scan_tmp" 2>/dev/null' RETURN
-  while IFS='|' read -r pid label; do
+  while IFS='|' read -r pid label _pos; do
     [[ -z "$pid" ]] && continue; n=$((n+1))
     local content; content=$(tmux capture-pane -t "$pid" -p -S -30 2>/dev/null || true)
     local si st sd; si=$(_detect "$content"); st=${si%%|*}; sd=${si#*|}
@@ -237,18 +270,25 @@ _daemon_scan() {
   [[ $a -ge 1 ]] && lb="▰▱▱▱▱"; [[ $a -ge 2 ]] && lb="▰▰▱▱▱"
   [[ $a -ge 3 ]] && lb="▰▰▰▱▱"; [[ $a -ge 4 ]] && lb="▰▰▰▰▱"
   [[ $a -ge 5 ]] && lb="▰▰▰▰▰"
-  local pl; pl=$(wc -l < "$PERMS_LOG" 2>/dev/null || echo 0)
+  # Trim whitespace from wc -l (macOS pads with spaces)
+  local pl; pl=$(wc -l < "$PERMS_LOG" 2>/dev/null || echo 0); pl="${pl// /}"
+  [[ "$pl" =~ ^[0-9]+$ ]] || pl=0
 
-  # [HARDENED #9] Atomic write via temp + rename
+  # [HARDENED #9] Atomic write via temp + rename — only replace if valid
   local tmp_state
   tmp_state=$(mktemp "$CACHE/state.XXXXXX")
   chmod 600 "$tmp_state"
-  jq -n --argjson ss "$sj" --argjson n "$n" --argjson w "$w" \
+  if jq -n --argjson ss "$sj" --argjson n "$n" --argjson w "$w" \
     --argjson q "$q" --argjson p "$p" --argjson e "$e" \
     --arg lb "$lb" --argjson pl "$pl" --arg u "$(date -Iseconds)" \
     '{sessions:$ss,count:$n,waiting:$w,questions:$q,permissions:$p,
-      errors:$e,load:$lb,perms_logged:$pl,updated:$u}' > "$tmp_state"
-  mv "$tmp_state" "$DAEMON_STATE"
+      errors:$e,load:$lb,perms_logged:$pl,updated:$u}' > "$tmp_state" \
+    && [[ -s "$tmp_state" ]]; then
+    mv "$tmp_state" "$DAEMON_STATE"
+  else
+    _log "scan: jq state write failed (n=$n w=$w)"
+    rm -f "$tmp_state"
+  fi
 
   for v in count waiting questions permissions errors load perms_logged; do
     tmux set-option -g @ccw_$v "$(jq -r ".$v" "$DAEMON_STATE")" 2>/dev/null || true
@@ -290,7 +330,7 @@ _daemon_start() {
 
   (
     trap 'rm -f "$DAEMON_PID"; exit 0' INT TERM HUP
-    while true; do _daemon_scan 2>/dev/null || true; sleep "$SCAN_INT"; done
+    while true; do _daemon_scan 2>>"$LOGFILE" || _log "scan: failed"; sleep "$SCAN_INT"; done
   ) &
   local child_pid=$!
   disown
@@ -359,16 +399,16 @@ _statusbar() {
   [[ "$n" -eq 0 ]] && { echo "#[fg=colour8]cc:0#[default]"; return; }
 
   local o=""
-  if [[ "$w" -gt 0 ]]; then o+="#[fg=colour3,bold]●${n}#[default]"
-  else o+="#[fg=colour2]●${n}#[default]"; fi
-  [[ "$q" -gt 0 ]] && o+=" #[fg=colour6]?${q}#[default]"
-  [[ "$p" -gt 0 ]] && o+=" #[fg=colour3]!${p}#[default]"
-  [[ "$e" -gt 0 ]] && o+=" #[fg=colour1]x${e}#[default]"
+  if [[ "$w" -gt 0 ]]; then o+="#[fg=colour0,bold]●${n}#[default]"
+  else o+="#[fg=colour0]●${n}#[default]"; fi
+  [[ "$q" -gt 0 ]] && o+=" #[fg=colour0]?${q}#[default]"
+  [[ "$p" -gt 0 ]] && o+=" #[fg=colour0,bold]!${p}#[default]"
+  [[ "$e" -gt 0 ]] && o+=" #[fg=colour0]x${e}#[default]"
   local ac=$((n-w))
-  if [[ $ac -le 1 ]]; then o+=" #[fg=colour2]${lb}#[default]"
-  elif [[ $ac -le 3 ]]; then o+=" #[fg=colour3]${lb}#[default]"
-  else o+=" #[fg=colour1]${lb}#[default]"; fi
-  [[ "$pl" -gt 20 ]] && o+=" #[fg=colour5]P${pl}#[default]"
+  if [[ $ac -le 1 ]]; then o+=" #[fg=colour0]${lb}#[default]"
+  elif [[ $ac -le 3 ]]; then o+=" #[fg=colour0]${lb}#[default]"
+  else o+=" #[fg=colour0,bold]${lb}#[default]"; fi
+  [[ "$pl" -gt 20 ]] && o+=" #[fg=colour0]P${pl}#[default]"
   echo "$o"
 }
 
@@ -377,12 +417,19 @@ _APROMPT='Analyze this Claude Code terminal. Return ONLY JSON:
 {"status":"working|waiting|idle|error|done","waiting_for_user":false,"waiting_reason":null,"pending_question":null,"pending_permission":null,"branch":"unknown","task_summary":"","current_action":"","files":[],"cognitive_load":{"score":1,"label":"trivial","reasoning":"","safe_to_switch_away":true,"context_cost":""},"suggested_action":""}
 Fill all fields. pending_question = verbatim question text if Claude is asking user something. pending_permission = {"tool":"","detail":"","description":""} if asking for tool approval. cognitive_load.score: 1=trivial 2=low 3=medium 4=high 5=intense. ONLY JSON output.'
 
-_analyze() { _call "think" "$_APROMPT" "Session: $2\n\nTerminal:\n$1\n\nHistory:\n$3" 500; }
+_analyze() {
+  local result
+  if result=$(_call "think" "$_APROMPT" "Session: $2\n\nTerminal:\n$1\n\nHistory:\n$3" 500); then
+    echo "$result"
+  else
+    echo '{"status":"error","waiting_for_user":false,"pending_question":null,"pending_permission":null,"branch":"?","task_summary":"API error","current_action":"","files":[],"cognitive_load":{"score":1,"label":"?","reasoning":"","safe_to_switch_away":true,"context_cost":""},"suggested_action":""}'
+  fi
+}
 
 _cbar() { case "$1" in
-  1) echo -e "${CG}▰${D}▱▱▱▱${R} ${CG}${2}${R}";; 2) echo -e "${CG}▰▰${D}▱▱▱${R} ${CG}${2}${R}";;
+  0|1) echo -e "${CG}▰${D}▱▱▱▱${R} ${CG}${2}${R}";; 2) echo -e "${CG}▰▰${D}▱▱▱${R} ${CG}${2}${R}";;
   3) echo -e "${CY}▰▰▰${D}▱▱${R} ${CY}${2}${R}";; 4) echo -e "${CR}▰▰▰▰${D}▱${R} ${CR}${2}${R}";;
-  5) echo -e "${CR}${B}▰▰▰▰▰${R} ${CR}${B}${2}${R}";; esac; }
+  5) echo -e "${CR}${B}▰▰▰▰▰${R} ${CR}${B}${2}${R}";; *) echo -e "${D}▱▱▱▱▱${R} ${D}${2}${R}";; esac; }
 _sbadge() { case "$1" in
   working) echo -e "${CG}●${R}";; waiting) echo -e "${CY}${B}◉${R}";; idle) echo -e "${D}○${R}";;
   error) echo -e "${CR}✖${R}";; done) echo -e "${CC}✔${R}";; *) echo -e "${D}?${R}";; esac; }
@@ -409,51 +456,75 @@ _cmd_default() {
 # ─── CMD: ls ──────────────────────────────────────────────────────────────────
 _cmd_ls() {
   _check_deps; _check_api
-  local S=() A=(); local h; h=$(_hist 20)
+  local S=() P=() A=(); local h; h=$(_hist 20)
   echo -e "${D}Analyzing...${R}"
-  while IFS='|' read -r pid lbl; do [[ -z "$pid" ]] && continue
-    S+=("$pid|$lbl"); A+=("$(_analyze "$(_cap "$pid")" "$lbl" "$h")")
+  while IFS='|' read -r pid lbl pos; do [[ -z "$pid" ]] && continue
+    S+=("$pid|$lbl"); P+=("$pos"); A+=("$(_analyze "$(_cap "$pid")" "$lbl" "$h")")
     _event "$pid" "scan" ""
   done < <(_discover)
-  [[ ${#S[@]} -eq 0 ]] && { echo -e "${D}No Claude Code sessions.${R}"; return; }
+  if [[ ${#S[@]} -eq 0 ]]; then echo -e "${D}No Claude Code sessions.${R}"; return; fi
 
   local SC=(); for i in "${!A[@]}"; do
     SC+=($(echo "${A[$i]}" | jq -r '.cognitive_load.score // 0' 2>/dev/null || echo 0)); done
   local SI=($(for i in "${!SC[@]}"; do echo "$i ${SC[$i]}"; done | sort -k2 -n | awk '{print $1}'))
 
-  echo -e "${B}${CC}  🔭 Sessions${R}"; echo ""
-  local pn=0 lo=()
+  echo ""
+  echo -e "  ${B}${CC}🔭 Sessions${R}  ${D}(${#S[@]} found, sorted by cognitive load)${R}"
+  echo -e "  ${D}──────────────────────────────────────────────────────────────${R}"
+  local pn=0 lo=() first=1
   for idx in "${SI[@]}"; do
-    local pid lbl; IFS='|' read -r pid lbl <<< "${S[$idx]}"; local a="${A[$idx]}"
-    local st ts na br cs cl ss
-    st=$(echo "$a"|jq -r '.status//"?"' 2>/dev/null)
-    ts=$(echo "$a"|jq -r '.task_summary//"?"' 2>/dev/null)
-    na=$(echo "$a"|jq -r '.current_action//"?"' 2>/dev/null)
-    br=$(echo "$a"|jq -r '.branch//"?"' 2>/dev/null)
-    cs=$(echo "$a"|jq -r '.cognitive_load.score//0' 2>/dev/null)
-    cl=$(echo "$a"|jq -r '.cognitive_load.label//"?"' 2>/dev/null)
-    ss=$(echo "$a"|jq -r '.cognitive_load.safe_to_switch_away//false' 2>/dev/null)
-    [[ "$cs" -le 2 ]] && lo+=("$lbl")
+    local pid lbl; IFS='|' read -r pid lbl <<< "${S[$idx]}"
+    local a="${A[$idx]}" pos="${P[$idx]}"
+    local st ts na br cs cl ss sa
+    st=$(echo "$a"|jq -r '.status//"?"' 2>/dev/null) || st="?"
+    ts=$(echo "$a"|jq -r '.task_summary//"?"' 2>/dev/null) || ts="?"
+    na=$(echo "$a"|jq -r '.current_action//"?"' 2>/dev/null) || na="?"
+    br=$(echo "$a"|jq -r '.branch//"?"' 2>/dev/null) || br="?"
+    cs=$(echo "$a"|jq -r '.cognitive_load.score//0' 2>/dev/null) || cs=0
+    cl=$(echo "$a"|jq -r '.cognitive_load.label//"?"' 2>/dev/null) || cl="?"
+    ss=$(echo "$a"|jq -r '.cognitive_load.safe_to_switch_away//false' 2>/dev/null) || ss="false"
+    sa=$(echo "$a"|jq -r '.suggested_action//""' 2>/dev/null) || sa=""
+    if [[ "$cs" -le 2 ]]; then lo+=("$lbl"); fi
 
-    local sw; [[ "$ss" == "true" ]] && sw="${CG}↔${R}" || sw="${CY}⚠${R}"
-    echo -e "  $(_sbadge "$st") ${B}${lbl}${R} ${D}[${br}]${R}  $(_cbar "$cs" "$cl")  $sw"
-    echo -e "    ${ts}"; echo -e "    ${D}↳ ${na}${R}"
+    if [[ "$first" -ne 1 ]]; then
+      echo -e "  ${D}──────────────────────────────────────────────────────────────${R}"
+    fi
+    first=0
 
-    local qq; qq=$(echo "$a"|jq -r '.pending_question//"null"' 2>/dev/null)
-    [[ "$qq" != "null" ]] && [[ -n "$qq" ]] && {
-      echo -e "    ${BC}${CW} ❓ ${R} ${CC}${qq}${R}"; pn=$((pn+1)); }
-    local pp; pp=$(echo "$a"|jq -r '.pending_permission//"null"' 2>/dev/null)
-    [[ "$pp" != "null" ]] && [[ -n "$pp" ]] && {
-      local tn pd; tn=$(echo "$pp"|jq -r '.tool'); pd=$(echo "$pp"|jq -r '.detail')
-      echo -e "    ${BY}${CW} 🔑 ${R} ${CY}${tn}(${pd})${R}"
+    # Header: badge + label + position + branch
+    local pos_tag=""
+    if [[ -n "$pos" ]]; then pos_tag=" ${D}(${pos})${R}"; fi
+    local sw; if [[ "$ss" == "true" ]]; then sw="${CG}↔${R}"; else sw="${CY}⚠${R}"; fi
+    echo -e "  $(_sbadge "$st") ${B}${lbl}${R}${pos_tag}  ${D}[${br}]${R}  $(_cbar "$cs" "$cl")  $sw"
+
+    # Task + action
+    echo -e "  ${D}│${R} ${ts}"
+    echo -e "  ${D}│${R} ${D}↳ ${na}${R}"
+    if [[ -n "$sa" ]]; then
+      echo -e "  ${D}│${R} ${CC}→ ${sa}${R}"
+    fi
+
+    # Alerts
+    local qq; qq=$(echo "$a"|jq -r '.pending_question//"null"' 2>/dev/null) || qq="null"
+    if [[ "$qq" != "null" ]] && [[ -n "$qq" ]]; then
+      echo -e "  ${D}│${R} ${BC}${CW} ❓ ${R} ${CC}${qq}${R}"; pn=$((pn+1))
+    fi
+    local pp; pp=$(echo "$a"|jq -r '.pending_permission//"null"' 2>/dev/null) || pp="null"
+    if [[ "$pp" != "null" ]] && [[ -n "$pp" ]]; then
+      local tn pd
+      tn=$(echo "$pp"|jq -r '.tool' 2>/dev/null) || tn="?"
+      pd=$(echo "$pp"|jq -r '.detail' 2>/dev/null) || pd="?"
+      echo -e "  ${D}│${R} ${BY}${CW} 🔑 ${R} ${CY}${tn}(${pd})${R}"
       _rotate_if_large "$PERMS_LOG"
       jq -nc --arg t "$(date -Iseconds)" --arg P "$pid" --arg l "$lbl" --arg tool "${tn}(${pd})" \
-        '{ts:$t,pane:$P,label:$l,tool:$tool}' >> "$PERMS_LOG"
-      pn=$((pn+1)); }
-    echo ""
+        '{ts:$t,pane:$P,label:$l,tool:$tool}' >> "$PERMS_LOG" || true
+      pn=$((pn+1))
+    fi
   done
-  [[ $pn -gt 0 ]] && echo -e "  ${CY}${B}${pn} need attention${R}"
-  [[ ${#lo[@]} -gt 0 ]] && echo -e "  ${D}💡 Quick: ${lo[*]}${R}"
+  echo -e "  ${D}──────────────────────────────────────────────────────────────${R}"
+  if [[ $pn -gt 0 ]]; then echo -e "  ${CY}${B}⚡ ${pn} need attention${R}"; fi
+  if [[ ${#lo[@]} -gt 0 ]]; then echo -e "  ${D}💡 Quick switch: ${lo[*]}${R}"; fi
+  echo ""
 }
 
 # ─── CMD: status ──────────────────────────────────────────────────────────────
@@ -488,7 +559,7 @@ _cmd_suggest() {
   _check_deps; _check_api
   local all="" n=0
   echo -e "${D}Analyzing all sessions...${R}"
-  while IFS='|' read -r pid lbl; do [[ -z "$pid" ]] && continue
+  while IFS='|' read -r pid lbl _pos; do [[ -z "$pid" ]] && continue
     all+="\n--- ${lbl} ---\n$(_analyze "$(_cap "$pid")" "$lbl" "")\n"; n=$((n+1))
   done < <(_discover)
   [[ $n -eq 0 ]] && { echo "No sessions."; return; }
@@ -497,7 +568,7 @@ _cmd_suggest() {
 PRIORITY: Which sessions to address first (1 line each, blocked first)
 STRATEGY: 2-3 sentences on optimal switching order by cognitive load.
 BATCH: Group related work. Mark quick check-ins vs deep focus. Be direct.' \
-    "Sessions:\n${all}\n\nHistory:\n$(_hist 30)" 500)
+    "Sessions:\n${all}\n\nHistory:\n$(_hist 30)" 500) || { echo "API error"; return 1; }
   echo ""; echo -e "${B}${CC}  💡 What to do next${R}"; echo ""
   echo "$r" | while IFS= read -r line; do echo -e "  $line"; done; echo ""
 }
@@ -525,7 +596,7 @@ Bash supports patterns: Bash(npm:*), Bash(git *), Bash(python *)
 Be conservative — narrowest pattern that covers usage. Never allow Bash(rm -rf *) or Bash(sudo *).
 Output JSON only (no fences):
 {"global":{"description":"~/.claude/settings.json","permissions":{"allow":[]}},"project":{"description":".claude/settings.json","permissions":{"allow":[]}},"summary":"1-2 sentences","warnings":[]}' \
-    "Requests:\n$agg\n\nCurrent settings:\n$cur" 500)
+    "Requests:\n$agg\n\nCurrent settings:\n$cur" 500) || { echo "API error"; return 1; }
 
   echo "$r" > "$CACHE/perm-suggestions.json"
   chmod 600 "$CACHE/perm-suggestions.json"
@@ -735,10 +806,10 @@ set -g status-interval 30
 run-shell -b "bash '${me_escaped}' daemon start"
 
 # Keybindings
-bind-key S display-popup -w 78 -h 22 -E "bash '${me_escaped}' status; echo; read -rsn1 -p '↵ '"
-bind-key A display-popup -w 92 -h 35 -E "bash '${me_escaped}' ls; echo; read -rsn1 -p '↵ '"
-bind-key G display-popup -w 82 -h 25 -E "bash '${me_escaped}' suggest; echo; read -rsn1 -p '↵ '"
-bind-key P display-popup -w 86 -h 30 -E "bash '${me_escaped}' permissions; echo; read -rsn1 -p '↵ '"
+bind-key S display-popup -w 78 -h 22 -E "bash '${me_escaped}' --popup status"
+bind-key A display-popup -w 92 -h 35 -E "bash '${me_escaped}' --popup ls"
+bind-key G display-popup -w 82 -h 25 -E "bash '${me_escaped}' --popup suggest"
+bind-key P display-popup -w 86 -h 30 -E "bash '${me_escaped}' --popup permissions"
 
 # Session persistence (panes + directories survive reboots)
 set -g @plugin 'tmux-plugins/tpm'
@@ -772,10 +843,10 @@ TMUX
     fi
   fi
 
-  tmux bind-key S display-popup -w 78 -h 22 -E "bash '${me_escaped}' status; echo; read -rsn1 -p '↵ '" 2>/dev/null || true
-  tmux bind-key A display-popup -w 92 -h 35 -E "bash '${me_escaped}' ls; echo; read -rsn1 -p '↵ '" 2>/dev/null || true
-  tmux bind-key G display-popup -w 82 -h 25 -E "bash '${me_escaped}' suggest; echo; read -rsn1 -p '↵ '" 2>/dev/null || true
-  tmux bind-key P display-popup -w 86 -h 30 -E "bash '${me_escaped}' permissions; echo; read -rsn1 -p '↵ '" 2>/dev/null || true
+  tmux bind-key S display-popup -w 78 -h 22 -E "bash '${me_escaped}' --popup status" 2>/dev/null || true
+  tmux bind-key A display-popup -w 92 -h 35 -E "bash '${me_escaped}' --popup ls" 2>/dev/null || true
+  tmux bind-key G display-popup -w 82 -h 25 -E "bash '${me_escaped}' --popup suggest" 2>/dev/null || true
+  tmux bind-key P display-popup -w 86 -h 30 -E "bash '${me_escaped}' --popup permissions" 2>/dev/null || true
 
   echo ""
   echo -e "${B}${CC}╭──────────────────────────────────────────────╮${R}"
@@ -812,6 +883,19 @@ case "${1:-}" in
   daemon|d) shift; case "${1:-status}" in
     start) _daemon_start ;; stop) _daemon_stop ;; *) _daemon_status ;; esac ;;
   --statusbar) _statusbar ;;
+  --popup) shift
+    # Wrapper for tmux display-popup: runs subcommand in bash, then waits for keypress.
+    # Needed because tmux popups use the default shell (often zsh), where
+    # bash-specific `read -rsn1` is invalid.
+    case "${1:-}" in
+      status|s) _cmd_status "${2:-}" ;;
+      ls|list) _cmd_ls ;;
+      suggest|sg) _cmd_suggest ;;
+      permissions|perm) shift; case "${1:-}" in
+        --apply) _cmd_perms_apply "${2:-user}" ;; --reset) _cmd_perms_reset ;; *) _cmd_perms ;; esac ;;
+    esac
+    echo ""; read -rsn1 -p $'↵ '
+    ;;
   voice|v) _check_deps; _check_api; export CCWATCH_VOICE=true
     echo "Voice mode — say commands aloud (WIP: install whisper-cpp for STT)"
     echo "For now, use keybindings. Voice alerts work with: export CCWATCH_VOICE=true" ;;
