@@ -174,7 +174,6 @@ _call() {
   # jq --arg safely handles all escaping — no shell injection possible
   local body_file=""
   body_file=$(mktemp "$CACHE/req.XXXXXX") || { _log "mktemp failed in _call"; return 1; }
-  trap 'rm -f "$body_file" 2>/dev/null' RETURN
   chmod 600 "$body_file"
   jq -n --arg m "$model" --arg s "$sys" --arg c "$usr" --argjson t "$tok" \
     '{model:$m,max_tokens:$t,system:$s,messages:[{role:"user",content:$c}]}' > "$body_file"
@@ -190,8 +189,10 @@ _call() {
     -H "anthropic-version: 2023-06-01" \
     -d @"$body_file" \
     "https://api.anthropic.com/v1/messages" 2>/dev/null) || {
+    rm -f "$body_file" 2>/dev/null
     echo "ERROR: API failed"; return 1
   }
+  rm -f "$body_file" 2>/dev/null
 
   # [HARDENED #11] Validate API response structure
   local text
@@ -304,7 +305,6 @@ _daemon_scan() {
   local n=0 w=0 q=0 p=0 e=0
   local scan_tmp
   scan_tmp=$(mktemp "$CACHE/scan.XXXXXX") || { _log "mktemp failed in _daemon_scan"; return; }
-  trap 'rm -f "$scan_tmp" 2>/dev/null' RETURN
   while IFS='|' read -r pid label _pos; do
     [[ -z "$pid" ]] && continue; n=$((n+1))
     local content; content=$(tmux capture-pane -t "$pid" -p -S -30 2>/dev/null) || { _log "pane $pid gone"; continue; }
@@ -321,8 +321,10 @@ _daemon_scan() {
 
   local sj
   if [[ ! -s "$scan_tmp" ]]; then sj="[]"
-  elif ! sj=$(jq -s '.' "$scan_tmp" 2>/dev/null); then _log "scan: corrupt scan_tmp"; return
+  elif ! sj=$(jq -s '.' "$scan_tmp" 2>/dev/null); then _log "scan: corrupt scan_tmp"; rm -f "$scan_tmp" 2>/dev/null; return
   fi
+
+  rm -f "$scan_tmp" 2>/dev/null
 
   local lb="▱▱▱▱▱"; local a=$((n-w))
   [[ $a -ge 1 ]] && lb="▰▱▱▱▱"; [[ $a -ge 2 ]] && lb="▰▰▱▱▱"
@@ -517,7 +519,6 @@ _ls_analyze() {
 
   echo -e "${D}Analyzing ${#_LS_S[@]} session(s)...${R}"
   local _adir; _adir=$(mktemp -d "$CACHE/par.XXXXXX") || { echo "ERROR: mktemp failed"; return 1; }
-  trap 'rm -rf "$_adir" 2>/dev/null' RETURN
   for i in "${!_LS_S[@]}"; do
     local pid lbl; IFS='|' read -r pid lbl <<< "${_LS_S[$i]}"
     ( _analyze "$(_cap "$pid")" "$lbl" "$h" > "$_adir/$i" ) &
@@ -532,6 +533,7 @@ _ls_analyze() {
       _LS_A+=("$result")
     fi
   done
+  rm -rf "$_adir" 2>/dev/null
 }
 
 _ls_render_session() {
@@ -677,7 +679,6 @@ _cmd_suggest() {
 
   # Parallel analysis — all API calls run concurrently
   local _adir; _adir=$(mktemp -d "$CACHE/par.XXXXXX") || { echo "ERROR: mktemp failed"; return 1; }
-  trap 'rm -rf "$_adir" 2>/dev/null' RETURN
   for i in "${!S[@]}"; do
     local pid lbl; IFS='|' read -r pid lbl <<< "${S[$i]}"
     ( _analyze "$(_cap "$pid")" "$lbl" "" > "$_adir/$i" ) &
@@ -693,6 +694,7 @@ _cmd_suggest() {
     fi
     all+="\n--- ${lbl} ---\n${result}\n"
   done
+  rm -rf "$_adir" 2>/dev/null
   local r; r=$(_call "think" \
     'Developer workflow advisor. Given session analyses + history, provide:
 PRIORITY: Which sessions to address first (1 line each, blocked first)

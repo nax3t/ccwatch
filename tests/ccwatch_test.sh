@@ -352,15 +352,14 @@ safe=$(printf '%s' "$raw_danger" | tr -cd 'a-zA-Z0-9 .,:!?()-')
 # () are allowed in the set, but $ ` " \ / ; are stripped
 _assert_eq "voice sanitize: backticks+dollar+semicolons stripped" "(rm -rf ) evil quoted" "$safe"
 
-# Temp file cleanup: verify RETURN trap pattern cleans up temp files
-# Run in subshell to avoid trap leaking $body_file into outer scope under set -u
+# Temp file cleanup: verify explicit rm pattern cleans up temp files
 _cleanup_result=$(
   set -uo pipefail
   _inner() {
     local body_file=""
     body_file=$(mktemp "$CACHE/req.XXXXXX")
-    trap 'rm -f "$body_file" 2>/dev/null' RETURN
     echo "test" > "$body_file"
+    rm -f "$body_file" 2>/dev/null
   }
   _inner
   leftover=$(ls "$CACHE"/req.* 2>/dev/null | wc -l | tr -d ' ')
