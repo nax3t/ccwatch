@@ -4,10 +4,9 @@ Ambient intelligence for Claude Code sessions in tmux.
 
 One status bar line. Three keybindings. No TUI to manage.
 
-```
-cc:4 ?1 !2 ==--- | 14:32     <- always visible, $0
-prefix+A                       <- full analysis on demand, ~$0.01
-```
+![status bar](assets/statusbar.png)
+
+Always visible, $0. Press `prefix+A` for full AI analysis (~$0.01).
 
 ## Install
 
