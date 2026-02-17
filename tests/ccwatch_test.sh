@@ -344,6 +344,17 @@ _cleanup_result=$(
 )
 _assert_eq "body_file cleaned up" "0" "$_cleanup_result"
 
+# Voice dispatch: say/espeak-ng use -- not xargs -0
+# Verify by extracting the say/espeak-ng lines from the script
+say_line=$(grep -E '^\s+say\)' "$SCRIPT_DIR/ccwatch.sh")
+_assert_match "voice: say uses -- flag" 'say -- ' "$say_line"
+espeak_line=$(grep -E '^\s+espeak-ng\)' "$SCRIPT_DIR/ccwatch.sh")
+_assert_match "voice: espeak-ng uses -- flag" 'espeak-ng -- ' "$espeak_line"
+
+# mktemp failure guards: verify all mktemp calls have || guards
+mktemp_unguarded=$(grep -n 'mktemp ' "$SCRIPT_DIR/ccwatch.sh" | grep -v '||' | grep -v '^#' || true)
+_assert_eq "all mktemp calls guarded" "" "$mktemp_unguarded"
+
 # ─── 11. Voice toggle: _voice_enabled ─────────────────────────────────────────
 echo ""
 echo "=== _voice_enabled ==="

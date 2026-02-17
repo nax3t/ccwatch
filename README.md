@@ -148,7 +148,7 @@ tmux status bar ← ●4 ?1 !2 ▰▰▱▱▱    (daemon writes tmux vars)
 |---|---|---|
 | `ANTHROPIC_API_KEY` | (required) | API key |
 | `CCWATCH_MODEL_FAST` | `claude-haiku-4-5-20251001` | Fast tier |
-| `CCWATCH_MODEL_THINK` | `claude-sonnet-4-5-20250929` | Think tier |
+| `CCWATCH_MODEL_THINK` | `claude-sonnet-4-5-20250929` | Think tier (ls, status, suggest, permissions) |
 | `CCWATCH_MODEL` | (none) | Override: force one model for everything |
 | `CCWATCH_VOICE` | `false` | Enable voice alerts |
 | `CCWATCH_SCAN_INTERVAL` | `30` | Daemon scan interval (seconds) |

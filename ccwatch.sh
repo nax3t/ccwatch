@@ -32,7 +32,7 @@ MAX_LOG_SIZE=5242880  # 5MB
 
 # ─── Models (two-tier: fast + think) ─────────────────────────────────────────
 M_FAST="${CCWATCH_MODEL_FAST:-claude-haiku-4-5-20251001}"
-M_THINK="${CCWATCH_MODEL_THINK:-claude-haiku-4-5-20251001}"
+M_THINK="${CCWATCH_MODEL_THINK:-claude-sonnet-4-5-20250929}"
 M_OVERRIDE="${CCWATCH_MODEL:-}"
 
 # [HARDENED #12] Validate model names — alphanumeric, hyphens, dots only
@@ -133,7 +133,7 @@ _call() {
   # [HARDENED #4] Build JSON body to a temp file to avoid API key in ps
   # jq --arg safely handles all escaping — no shell injection possible
   local body_file=""
-  body_file=$(mktemp "$CACHE/req.XXXXXX")
+  body_file=$(mktemp "$CACHE/req.XXXXXX") || { _log "mktemp failed in _call"; return 1; }
   trap 'rm -f "$body_file" 2>/dev/null' RETURN
   chmod 600 "$body_file"
   jq -n --arg m "$model" --arg s "$sys" --arg c "$usr" --argjson t "$tok" \
@@ -258,11 +258,11 @@ _detect() {
 _daemon_scan() {
   local n=0 w=0 q=0 p=0 e=0
   local scan_tmp
-  scan_tmp=$(mktemp "$CACHE/scan.XXXXXX")
+  scan_tmp=$(mktemp "$CACHE/scan.XXXXXX") || { _log "mktemp failed in _daemon_scan"; return; }
   trap 'rm -f "$scan_tmp" 2>/dev/null' RETURN
   while IFS='|' read -r pid label _pos; do
     [[ -z "$pid" ]] && continue; n=$((n+1))
-    local content; content=$(tmux capture-pane -t "$pid" -p -S -30 2>/dev/null || true)
+    local content; content=$(tmux capture-pane -t "$pid" -p -S -30 2>/dev/null) || { _log "pane $pid gone"; continue; }
     local si st sd; si=$(_detect "$content"); st=${si%%|*}; sd=${si#*|}
     case "$st" in
       permission) p=$((p+1)); w=$((w+1))
@@ -277,7 +277,9 @@ _daemon_scan() {
   done < <(_discover)
 
   local sj
-  sj=$(jq -s '.' "$scan_tmp" 2>/dev/null || echo "[]")
+  if [[ ! -s "$scan_tmp" ]]; then sj="[]"
+  elif ! sj=$(jq -s '.' "$scan_tmp" 2>/dev/null); then _log "scan: corrupt scan_tmp"; return
+  fi
 
   local lb="▱▱▱▱▱"; local a=$((n-w))
   [[ $a -ge 1 ]] && lb="▰▱▱▱▱"; [[ $a -ge 2 ]] && lb="▰▰▱▱▱"
@@ -289,7 +291,7 @@ _daemon_scan() {
 
   # [HARDENED #9] Atomic write via temp + rename — only replace if valid
   local tmp_state
-  tmp_state=$(mktemp "$CACHE/state.XXXXXX")
+  tmp_state=$(mktemp "$CACHE/state.XXXXXX") || { _log "mktemp failed for state write"; return; }
   chmod 600 "$tmp_state"
   if jq -n --argjson ss "$sj" --argjson n "$n" --argjson w "$w" \
     --argjson q "$q" --argjson p "$p" --argjson e "$e" \
@@ -350,7 +352,7 @@ _daemon_start() {
   disown
 
   # Write PID from parent — $! is the correct subshell PID (portable, no BASHPID needed)
-  local tmp_pid; tmp_pid=$(mktemp "$CACHE/pid.XXXXXX")
+  local tmp_pid; tmp_pid=$(mktemp "$CACHE/pid.XXXXXX") || { _log "mktemp failed for PID write"; return 1; }
   echo "$child_pid" > "$tmp_pid"
   mv "$tmp_pid" "$DAEMON_PID"
 
@@ -497,7 +499,7 @@ _cmd_ls() {
 
   # Parallel analysis — all API calls run concurrently
   echo -e "${D}Analyzing ${#S[@]} session(s)...${R}"
-  local _adir; _adir=$(mktemp -d "$CACHE/par.XXXXXX")
+  local _adir; _adir=$(mktemp -d "$CACHE/par.XXXXXX") || { echo "ERROR: mktemp failed"; return 1; }
   trap 'rm -rf "$_adir" 2>/dev/null' RETURN
   for i in "${!S[@]}"; do
     local pid lbl; IFS='|' read -r pid lbl <<< "${S[$i]}"
@@ -733,7 +735,7 @@ _cmd_perms_apply() {
     cp "$tf" "${tf}.bak.$(date +%s)"
     # [HARDENED #10] Atomic write for settings
     local tmp_settings
-    tmp_settings=$(mktemp "$(dirname "$tf")/settings.XXXXXX")
+    tmp_settings=$(mktemp "$(dirname "$tf")/settings.XXXXXX") || { echo "ERROR: mktemp failed"; return 1; }
     chmod 600 "$tmp_settings"
     if jq --argjson new "$rules" '.permissions//={}|.permissions.allow=((.permissions.allow//[])+($new.allow//[])|unique)' "$tf" > "$tmp_settings" 2>/dev/null; then
       mv "$tmp_settings" "$tf"
@@ -743,7 +745,7 @@ _cmd_perms_apply() {
     fi
   else
     local tmp_new
-    tmp_new=$(mktemp "$(dirname "$tf")/settings.XXXXXX")
+    tmp_new=$(mktemp "$(dirname "$tf")/settings.XXXXXX") || { echo "ERROR: mktemp failed"; return 1; }
     chmod 600 "$tmp_new"
     if jq -n --argjson p "$rules" '{permissions:$p}' > "$tmp_new" 2>/dev/null; then
       mv "$tmp_new" "$tf"
@@ -794,9 +796,9 @@ _voice_alert() {
   local audio_tmp="$CACHE/voice.wav"
 
   case "$be" in
-    # Use printf %s to avoid any shell interpretation of msg content
-    say) printf '%s' "$msg" | xargs -0 say &>/dev/null & ;;
-    espeak-ng) printf '%s' "$msg" | xargs -0 espeak-ng &>/dev/null & ;;
+    # msg is already sanitized to [a-zA-Z0-9 .,:!?()-]; -- is defense-in-depth
+    say) say -- "$msg" &>/dev/null & ;;
+    espeak-ng) espeak-ng -- "$msg" &>/dev/null & ;;
     piper)
       printf '%s' "$msg" | piper --output_file "$audio_tmp" 2>/dev/null \
         && play -q "$audio_tmp" 2>/dev/null &
@@ -863,7 +865,7 @@ _cmd_setup() {
     echo -e "${CR}not set${R}"
     echo ""
     echo "ccwatch uses the Anthropic API (not your Max/Pro subscription)."
-    echo "Cost: ~\$0.001/scan (Haiku), ~\$0.01/suggestion (Sonnet)"
+    echo "Cost: ~\$0.01/call (Sonnet think tier), ~\$0.001/call (Haiku fast tier)"
     echo ""
     echo "  1. Get a key: https://console.anthropic.com/settings/keys"
     if [[ "$(uname)" == "Darwin" ]]; then
@@ -1106,8 +1108,8 @@ Keybindings (on-demand, ~$0.01/call):
   prefix+S  status     prefix+A  list all
   prefix+G  suggest    prefix+P  permissions
 
-Models: Haiku (all commands by default)
-Cost: ~$0.01-0.10/day with heavy use
+Models: Haiku (fast tier), Sonnet (think tier: ls, status, suggest, permissions)
+Cost: ~$0.10-0.50/day with heavy use
 API: Uses ANTHROPIC_API_KEY — resolved from env var or macOS Keychain
 
 Env:
