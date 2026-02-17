@@ -477,12 +477,24 @@ _cmd_default() {
 _cmd_ls() {
   _check_deps; _check_api
   local S=() P=() A=(); local h; h=$(_hist 20)
-  echo -e "${D}Analyzing...${R}"
+
+  # Discover all sessions first
   while IFS='|' read -r pid lbl pos; do [[ -z "$pid" ]] && continue
-    S+=("$pid|$lbl"); P+=("$pos"); A+=("$(_analyze "$(_cap "$pid")" "$lbl" "$h")")
+    S+=("$pid|$lbl"); P+=("$pos")
     _event "$pid" "scan" ""
   done < <(_discover)
   if [[ ${#S[@]} -eq 0 ]]; then echo -e "${D}No Claude Code sessions.${R}"; return; fi
+
+  # Parallel analysis — all API calls run concurrently
+  echo -e "${D}Analyzing ${#S[@]} session(s)...${R}"
+  local _adir; _adir=$(mktemp -d "$CACHE/par.XXXXXX")
+  for i in "${!S[@]}"; do
+    local pid lbl; IFS='|' read -r pid lbl <<< "${S[$i]}"
+    ( _analyze "$(_cap "$pid")" "$lbl" "$h" > "$_adir/$i" ) &
+  done
+  wait
+  for i in "${!S[@]}"; do A+=("$(cat "$_adir/$i")"); done
+  rm -rf "$_adir"
 
   local SC=(); for i in "${!A[@]}"; do
     SC+=($(echo "${A[$i]}" | jq -r '.cognitive_load.score // 0' 2>/dev/null || echo 0)); done
@@ -880,8 +892,8 @@ set -g status-interval 30
 run-shell -b "bash '${me_escaped}' daemon start"
 
 # Keybindings
-bind-key S display-popup -w 78 -h 22 -E "bash '${me_escaped}' --popup status"
-bind-key A display-popup -w 92 -h 35 -E "bash '${me_escaped}' --popup ls"
+bind-key S display-popup -w 78 -h 30 -E "bash '${me_escaped}' --popup status"
+bind-key A display-popup -w 92 -h 40 -E "bash '${me_escaped}' --popup ls"
 bind-key G display-popup -w 82 -h 25 -E "bash '${me_escaped}' --popup suggest"
 bind-key P display-popup -w 86 -h 30 -E "bash '${me_escaped}' --popup permissions"
 
@@ -917,8 +929,8 @@ TMUX
     fi
   fi
 
-  tmux bind-key S display-popup -w 78 -h 22 -E "bash '${me_escaped}' --popup status" 2>/dev/null || true
-  tmux bind-key A display-popup -w 92 -h 35 -E "bash '${me_escaped}' --popup ls" 2>/dev/null || true
+  tmux bind-key S display-popup -w 78 -h 30 -E "bash '${me_escaped}' --popup status" 2>/dev/null || true
+  tmux bind-key A display-popup -w 92 -h 40 -E "bash '${me_escaped}' --popup ls" 2>/dev/null || true
   tmux bind-key G display-popup -w 82 -h 25 -E "bash '${me_escaped}' --popup suggest" 2>/dev/null || true
   tmux bind-key P display-popup -w 86 -h 30 -E "bash '${me_escaped}' --popup permissions" 2>/dev/null || true
 
@@ -1009,17 +1021,22 @@ case "${1:-}" in
     start) _daemon_start ;; stop) _daemon_stop ;; *) _daemon_status ;; esac ;;
   --statusbar) _statusbar ;;
   --popup) shift
-    # Wrapper for tmux display-popup: runs subcommand in bash, then waits for keypress.
-    # EXIT trap ensures popup stays open for reading even if set -e kills the script
-    # (e.g. API failure, jq parse error, missing key).
-    trap 'echo ""; read -rsn1 -p $'"'"'↵ '"'"'' EXIT
-    case "${1:-}" in
-      status|s) _cmd_status "${2:-}" ;;
-      ls|list) _cmd_ls ;;
-      suggest|sg) _cmd_suggest ;;
-      permissions|perm) shift; case "${1:-}" in
-        --apply) _cmd_perms_apply "${2:-user}" ;; --reset) _cmd_perms_reset ;; *) _cmd_perms ;; esac ;;
-    esac
+    # Wrapper for tmux display-popup: pipe output through less for scrolling.
+    # Subshell uses set +e so errors produce visible output instead of killing the process.
+    # less -R preserves ANSI colors; -P sets a footer with navigation hints.
+    # User presses q to close (popup -E flag closes on command exit).
+    (
+      set +e
+      case "${1:-}" in
+        status|s) _cmd_status "${2:-}" ;;
+        ls|list) _cmd_ls ;;
+        suggest|sg) _cmd_suggest ;;
+        permissions|perm) shift; case "${1:-}" in
+          --apply) _cmd_perms_apply "${2:-user}" ;; --reset) _cmd_perms_reset ;; *) _cmd_perms ;; esac ;;
+      esac
+      echo ""
+      echo -e "  ${D}prefix+S status  prefix+A list  prefix+G suggest  prefix+P permissions${R}"
+    ) 2>&1 | less -R -P " q close | ↑↓ scroll | / search"
     ;;
   key|k) _cmd_key "${2:-}" ;;
   voice|v) _cmd_voice "${2:-}" ;;
