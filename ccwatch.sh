@@ -232,23 +232,28 @@ _discover() {
 
 # ─── Pattern-based state detection (no AI) ────────────────────────────────────
 _detect() {
-  local tail; tail=$(echo "$1" | tail -20)
+  local tail; tail=$(tail -20 <<< "$1")
+  # Regex patterns stored in variables for [[ =~ ]] (avoids quoting issues)
+  local _re_perm='Allow .+\(|Approve .+\(|\(Y\)es.*\(N\)o|❯ .*(Yes|No|Always)'
+  local _re_ques='(What would you|How should I|Which approach|Do you prefer|Should I |Would you like me to|Could you clarify).*\?'
+  local _re_work='⏺|╭──|⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏'
   # Permission: look for Claude Code tool-approval patterns
-  if echo "$tail" | grep -qE 'Allow .+\(|Approve .+\(|\(Y\)es.*\(N\)o|❯ .*(Yes|No|Always)'; then
-    local t; t=$(echo "$tail" | grep -oE '(Bash|Read|Write|Edit|MultiEdit|WebFetch|Task|Glob|Grep|LS|WebSearch|NotebookEdit)\([^)]+\)' | tail -1)
+  if [[ "$tail" =~ $_re_perm ]]; then
+    local t; t=$(grep -oE '(Bash|Read|Write|Edit|MultiEdit|WebFetch|Task|Glob|Grep|LS|WebSearch|NotebookEdit)\([^)]+\)' <<< "$tail" | tail -1)
     echo "permission|${t:-unknown}"; return
   fi
   # Question: require trailing ? to reduce false positives from code output
-  if echo "$tail" | grep -qiE '(What would you|How should I|Which approach|Do you prefer|Should I |Would you like me to|Could you clarify).*\?'; then
-    local q; q=$(echo "$tail" | grep -iE '(What|How|Which|Should|Would|Could|Do you).*\?' | tail -1 | sed 's/^[[:space:]]*//' | head -c 120)
+  # Keep grep -qiE here — case-insensitive [[ =~ ]] requires Bash 4+
+  if grep -qiE "$_re_ques" <<< "$tail"; then
+    local q; q=$(grep -iE '(What|How|Which|Should|Would|Could|Do you).*\?' <<< "$tail" | tail -1 | sed 's/^[[:space:]]*//' | head -c 120)
     echo "question|$q"; return
   fi
-  # Error: anchor patterns to reduce false positives from displayed code/logs
-  if echo "$tail" | grep -qE '(^Error:|^ERROR[ :]|FAILED|^panic:|^Traceback \(most recent)'; then
+  # Error: anchor patterns — keep grep for per-line ^ anchoring
+  if grep -qE '(^Error:|^ERROR[ :]|FAILED|^panic:|^Traceback \(most recent)' <<< "$tail"; then
     echo "error|"; return
   fi
   # Working: use Claude Code-specific indicators (⏺ bullet, box drawing, spinners)
-  if echo "$tail" | grep -qE '(⏺|╭──|⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏)'; then
+  if [[ "$tail" =~ $_re_work ]]; then
     echo "working|"; return
   fi
   echo "idle|"
@@ -305,9 +310,13 @@ _daemon_scan() {
     rm -f "$tmp_state"
   fi
 
-  for v in count waiting questions permissions errors load perms_logged; do
-    tmux set-option -g @ccw_$v "$(jq -r ".$v" "$DAEMON_STATE")" 2>/dev/null || true
-  done
+  tmux set-option -g @ccw_count "$n" 2>/dev/null || true
+  tmux set-option -g @ccw_waiting "$w" 2>/dev/null || true
+  tmux set-option -g @ccw_questions "$q" 2>/dev/null || true
+  tmux set-option -g @ccw_permissions "$p" 2>/dev/null || true
+  tmux set-option -g @ccw_errors "$e" 2>/dev/null || true
+  tmux set-option -g @ccw_load "$lb" 2>/dev/null || true
+  tmux set-option -g @ccw_perms_logged "$pl" 2>/dev/null || true
 
   local prev; prev=$(tmux show-option -gqv @ccw_prev_w 2>/dev/null || echo 0)
   if [[ "$w" -gt "${prev:-0}" ]] && [[ "$w" -gt 0 ]]; then
@@ -421,9 +430,8 @@ _statusbar() {
   [[ "$p" -gt 0 ]] && o+=" #[fg=colour0,bold]!${p}#[default]"
   [[ "$e" -gt 0 ]] && o+=" #[fg=colour0]x${e}#[default]"
   local ac=$((n-w))
-  if [[ $ac -le 1 ]]; then o+=" #[fg=colour0]${lb}#[default]"
-  elif [[ $ac -le 3 ]]; then o+=" #[fg=colour0]${lb}#[default]"
-  else o+=" #[fg=colour0,bold]${lb}#[default]"; fi
+  if [[ $ac -gt 3 ]]; then o+=" #[fg=colour0,bold]${lb}#[default]"
+  else o+=" #[fg=colour0]${lb}#[default]"; fi
   [[ "$pl" -gt 20 ]] && o+=" #[fg=colour0]P${pl}#[default]"
   echo "$o"
 }
@@ -453,14 +461,14 @@ _sbadge() { case "$1" in
 # ─── CMD: (default) ──────────────────────────────────────────────────────────
 _cmd_default() {
   [[ ! -f "$DAEMON_STATE" ]] && { echo "Run: ccwatch setup"; return; }
-  local n w q p e lb pl
-  n=$(jq -r '.count // 0' "$DAEMON_STATE" 2>/dev/null || echo 0)
-  w=$(jq -r '.waiting // 0' "$DAEMON_STATE" 2>/dev/null || echo 0)
-  q=$(jq -r '.questions // 0' "$DAEMON_STATE" 2>/dev/null || echo 0)
-  p=$(jq -r '.permissions // 0' "$DAEMON_STATE" 2>/dev/null || echo 0)
-  e=$(jq -r '.errors // 0' "$DAEMON_STATE" 2>/dev/null || echo 0)
-  lb=$(jq -r '.load // "▱▱▱▱▱"' "$DAEMON_STATE" 2>/dev/null || echo "▱▱▱▱▱")
-  pl=$(jq -r '.perms_logged // 0' "$DAEMON_STATE" 2>/dev/null || echo 0)
+  local n=0 w=0 q=0 p=0 e=0 lb="▱▱▱▱▱" pl=0
+  local _f
+  _f=$(jq -r '[(.count//0),(.waiting//0),(.questions//0),(.permissions//0),
+    (.errors//0),(.load//"▱▱▱▱▱"),(.perms_logged//0)]|join("\t")' "$DAEMON_STATE" 2>/dev/null) || true
+  [[ -n "$_f" ]] && IFS=$'\t' read -r n w q p e lb pl <<< "$_f"
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0; [[ "$w" =~ ^[0-9]+$ ]] || w=0
+  [[ "$q" =~ ^[0-9]+$ ]] || q=0; [[ "$p" =~ ^[0-9]+$ ]] || p=0
+  [[ "$e" =~ ^[0-9]+$ ]] || e=0; [[ "$pl" =~ ^[0-9]+$ ]] || pl=0
   echo -e "${CG}●${R} ${n} sessions  ${lb}"
   [[ "$q" -gt 0 ]] && echo -e "  ${CC}❓ ${q} question(s)${R}"
   [[ "$p" -gt 0 ]] && echo -e "  ${CY}🔑 ${p} permission(s)${R}"
@@ -510,8 +518,14 @@ _cmd_ls() {
   rm -rf "$_adir"
 
   local SC=(); for i in "${!A[@]}"; do
-    SC+=($(echo "${A[$i]}" | jq -r '.cognitive_load.score // 0' 2>/dev/null || echo 0)); done
-  local SI=($(for i in "${!SC[@]}"; do echo "$i ${SC[$i]}"; done | sort -k2 -n | awk '{print $1}'))
+    SC+=($(jq -r '.cognitive_load.score // 0' <<< "${A[$i]}" 2>/dev/null || echo 0)); done
+  # Bash insertion sort — avoids for|echo|sort|awk pipeline (4 forks → 0)
+  local SI=()
+  for i in "${!SC[@]}"; do
+    local j=0
+    while [[ $j -lt ${#SI[@]} ]] && [[ ${SC[${SI[$j]}]} -le ${SC[$i]} ]]; do j=$((j+1)); done
+    SI=("${SI[@]:0:$j}" "$i" "${SI[@]:$j}")
+  done
 
   echo ""
   echo -e "  ${B}${CC}🔭 Sessions${R}  ${D}(${#S[@]} found, sorted by cognitive load)${R}"
@@ -521,14 +535,12 @@ _cmd_ls() {
     local pid lbl; IFS='|' read -r pid lbl <<< "${S[$idx]}"
     local a="${A[$idx]}" pos="${P[$idx]}"
     local st ts na br cs cl ss sa
-    st=$(echo "$a"|jq -r '.status//"?"' 2>/dev/null) || st="?"
-    ts=$(echo "$a"|jq -r '.task_summary//"?"' 2>/dev/null) || ts="?"
-    na=$(echo "$a"|jq -r '.current_action//"?"' 2>/dev/null) || na="?"
-    br=$(echo "$a"|jq -r '.branch//"?"' 2>/dev/null) || br="?"
-    cs=$(echo "$a"|jq -r '.cognitive_load.score//0' 2>/dev/null) || cs=0
-    cl=$(echo "$a"|jq -r '.cognitive_load.label//"?"' 2>/dev/null) || cl="?"
-    ss=$(echo "$a"|jq -r '.cognitive_load.safe_to_switch_away//false' 2>/dev/null) || ss="false"
-    sa=$(echo "$a"|jq -r '.suggested_action//""' 2>/dev/null) || sa=""
+    local _sf
+    _sf=$(jq -r '[(.status//"?"),(.task_summary//"?"),(.current_action//"?"),
+      (.branch//"?"),(.cognitive_load.score//0),(.cognitive_load.label//"?"),
+      (.cognitive_load.safe_to_switch_away//false),(.suggested_action//"")
+    ]|join("\t")' <<< "$a" 2>/dev/null) || true
+    IFS=$'\t' read -r st ts na br cs cl ss sa <<< "$_sf"
     if [[ "$cs" -le 2 ]]; then lo+=("$lbl"); fi
     case "$st" in working) v_working=$((v_working+1));; waiting) v_waiting=$((v_waiting+1));;
       idle) v_idle=$((v_idle+1));; error) v_error=$((v_error+1));; esac
@@ -551,16 +563,17 @@ _cmd_ls() {
       echo -e "  ${D}│${R} ${CC}→ ${sa}${R}"
     fi
 
-    # Alerts
-    local qq; qq=$(echo "$a"|jq -r '.pending_question//"null"' 2>/dev/null) || qq="null"
+    # Alerts — extract question and permission tool/detail in one jq call
+    local qq tn pd
+    local _af
+    _af=$(jq -r '[(.pending_question//"null"),
+      (.pending_permission.tool//"null"),(.pending_permission.detail//"null")
+    ]|join("\t")' <<< "$a" 2>/dev/null) || true
+    IFS=$'\t' read -r qq tn pd <<< "$_af"
     if [[ "$qq" != "null" ]] && [[ -n "$qq" ]]; then
       echo -e "  ${D}│${R} ${BC}${CW} ❓ ${R} ${CC}${qq}${R}"; pn=$((pn+1))
     fi
-    local pp; pp=$(echo "$a"|jq -r '.pending_permission//"null"' 2>/dev/null) || pp="null"
-    if [[ "$pp" != "null" ]] && [[ -n "$pp" ]]; then
-      local tn pd
-      tn=$(echo "$pp"|jq -r '.tool' 2>/dev/null) || tn="?"
-      pd=$(echo "$pp"|jq -r '.detail' 2>/dev/null) || pd="?"
+    if [[ "$tn" != "null" ]] && [[ -n "$tn" ]]; then
       echo -e "  ${D}│${R} ${BY}${CW} 🔑 ${R} ${CY}${tn}(${pd})${R}"
       _rotate_if_large "$PERMS_LOG"
       jq -nc --arg t "$(date -Iseconds)" --arg P "$pid" --arg l "$lbl" --arg tool "${tn}(${pd})" \
@@ -573,7 +586,7 @@ _cmd_ls() {
     if [[ "$qq" != "null" ]] && [[ -n "$qq" ]]; then
       vdetails+=" Asking: ${qq}"
     fi
-    if [[ "$pp" != "null" ]] && [[ -n "$pp" ]]; then
+    if [[ "$tn" != "null" ]] && [[ -n "$tn" ]]; then
       vdetails+=" Waiting for permission to use ${tn}."
     fi
     [[ -n "$sa" ]] && vdetails+=" Suggested action: ${sa}."
@@ -611,37 +624,38 @@ _cmd_status() {
   local l; l=$(tmux display-message -t "$t" -p '#{session_name}:#{window_index}.#{pane_index}')
   echo -e "${D}Analyzing ${l}...${R}"
   local a; a=$(_analyze "$(_cap "$t")" "$l" "$(_hist 20)")
+  # Single jq call extracts all fields as tab-separated
+  local st br cs cl cr cc sa ts na f qq pp_tool pp_detail pp_desc
+  local _sf
+  _sf=$(jq -r '[(.status//"?"),(.branch//"?"),(.cognitive_load.score//0),
+    (.cognitive_load.label//"?"),(.cognitive_load.reasoning//""),
+    (.cognitive_load.context_cost//""),(.suggested_action//""),
+    (.task_summary//"?"),(.current_action//"?"),
+    ((.files//[])|join(", ")),(.pending_question//"null"),
+    (.pending_permission.tool//"null"),(.pending_permission.detail//"null"),
+    (.pending_permission.description//"null")
+  ]|join("\t")' <<< "$a" 2>/dev/null) || true
+  IFS=$'\t' read -r st br cs cl cr cc sa ts na f qq pp_tool pp_detail pp_desc <<< "$_sf"
+
   echo ""
-  echo -e "  $(_sbadge "$(echo "$a"|jq -r '.status')") ${B}${l}${R} ${D}[$(echo "$a"|jq -r '.branch')]${R}"
-  local cs cl cr cc sa
-  cs=$(echo "$a"|jq -r '.cognitive_load.score//0'); cl=$(echo "$a"|jq -r '.cognitive_load.label//"?"')
-  cr=$(echo "$a"|jq -r '.cognitive_load.reasoning//""'); cc=$(echo "$a"|jq -r '.cognitive_load.context_cost//""')
-  sa=$(echo "$a"|jq -r '.suggested_action//""')
+  echo -e "  $(_sbadge "$st") ${B}${l}${R} ${D}[${br}]${R}"
   echo -e "  $(_cbar "$cs" "$cl")"; echo -e "  ${D}${cr}${R}"
   [[ -n "$cc" ]] && echo -e "  ${D}Switch cost: ${cc}${R}"
-  echo ""; echo -e "  ${B}Task:${R}  $(echo "$a"|jq -r '.task_summary')"
-  echo -e "  ${B}Now:${R}   $(echo "$a"|jq -r '.current_action')"
-  local f; f=$(echo "$a"|jq -r '(.files//[])|join(", ")'); [[ -n "$f" ]] && echo -e "  ${B}Files:${R} ${f}"
+  echo ""; echo -e "  ${B}Task:${R}  ${ts}"
+  echo -e "  ${B}Now:${R}   ${na}"
+  [[ -n "$f" ]] && echo -e "  ${B}Files:${R} ${f}"
   [[ -n "$sa" ]] && echo -e "  ${B}Next:${R}  ${CC}${sa}${R}"
-  local qq; qq=$(echo "$a"|jq -r '.pending_question//"null"')
   [[ "$qq" != "null" ]] && { echo ""; echo -e "  ${BC}${CW} ❓ ${R} ${CC}${qq}${R}"; }
-  local pp; pp=$(echo "$a"|jq -r '.pending_permission//"null"')
-  [[ "$pp" != "null" ]] && { echo ""; echo -e "  ${BY}${CW} 🔑 ${R} ${CY}$(echo "$pp"|jq -r '"\(.tool)(\(.detail)): \(.description)"')${R}"; }
-  # Voice narration — comprehensive status readout
-  local vst; vst=$(echo "$a"|jq -r '.status//"unknown"' 2>/dev/null)
-  local vts; vts=$(echo "$a"|jq -r '.task_summary//"unknown"' 2>/dev/null)
-  local vna; vna=$(echo "$a"|jq -r '.current_action//"unknown"' 2>/dev/null)
-  local vbr; vbr=$(echo "$a"|jq -r '.branch//"unknown"' 2>/dev/null)
-  local vcr; vcr=$(echo "$a"|jq -r '.cognitive_load.reasoning//""' 2>/dev/null)
-  local vcc; vcc=$(echo "$a"|jq -r '.cognitive_load.context_cost//""' 2>/dev/null)
-  local vmsg="Session ${l} on branch ${vbr}. Status is ${vst}, with ${cl} cognitive load."
-  vmsg+=" Task: ${vts}. Currently: ${vna}."
-  [[ -n "$vcr" ]] && vmsg+=" ${vcr}."
-  [[ -n "$vcc" ]] && vmsg+=" Switch cost: ${vcc}."
+  [[ "$pp_tool" != "null" ]] && { echo ""; echo -e "  ${BY}${CW} 🔑 ${R} ${CY}${pp_tool}(${pp_detail}): ${pp_desc}${R}"; }
+  # Voice narration — vars already extracted above
+  local vmsg="Session ${l} on branch ${br}. Status is ${st}, with ${cl} cognitive load."
+  vmsg+=" Task: ${ts}. Currently: ${na}."
+  [[ -n "$cr" ]] && vmsg+=" ${cr}."
+  [[ -n "$cc" ]] && vmsg+=" Switch cost: ${cc}."
   [[ -n "$f" ]] && vmsg+=" Files involved: ${f}."
   [[ -n "$sa" ]] && vmsg+=" Suggested next step: ${sa}."
   [[ "$qq" != "null" ]] && vmsg+=" Claude is asking: ${qq}."
-  [[ "$pp" != "null" ]] && vmsg+=" Waiting for permission approval."
+  [[ "$pp_tool" != "null" ]] && vmsg+=" Waiting for permission approval."
   _voice_alert "$vmsg"
 }
 
@@ -785,8 +799,7 @@ _voice_alert() {
   # [HARDENED #1 #2] Sanitize TTS input — strip ANSI, shell metacharacters,
   # and anything that could be interpreted by the shell.
   # Only allow: alphanumeric, spaces, periods, commas, hyphens, colons
-  msg=$(echo "$msg" | sed 's/\x1b\[[0-9;]*m//g')
-  msg=$(echo "$msg" | tr -cd 'a-zA-Z0-9 .,:!?()-')
+  msg=$(sed 's/\x1b\[[0-9;]*m//g; s/[^a-zA-Z0-9 .,:!?()-]//g' <<< "$msg")
   # Truncate to prevent abuse
   msg="${msg:0:2000}"
   # Reject empty after sanitization
