@@ -98,7 +98,8 @@ _extract_fn() {
 # Extract and eval each function we need to test
 for fn in _validate_model _validate_pane_id _check_api _check_deps \
           _detect _sbadge _cbar _read_state _statusbar _rotate_if_large \
-          _voice_enabled _voice_alert _voice_summary _log _log_permission _resolve_api_key; do
+          _voice_enabled _voice_alert _voice_summary _log _log_permission _resolve_api_key \
+          _notify_enabled _notify_resolve_webhook _notify_send _notify_cooldown_ok _notify_alert; do
   eval "$(_extract_fn "$fn")"
 done
 
@@ -444,6 +445,116 @@ _assert_eq "no key anywhere: stays empty" "" "$out"
 
 # Restore key for remaining tests
 ANTHROPIC_API_KEY="sk-ant-test-key-000000"
+
+# ─── 13. Notify toggle: _notify_enabled ──────────────────────────────────────
+echo ""
+echo "=== _notify_enabled ==="
+
+# Neither env var nor file → disabled
+unset CCWATCH_DISCORD_WEBHOOK
+rm -f "$CACHE/notify_enabled"
+_notify_enabled 2>/dev/null
+_assert_eq "disabled by default" "1" "$?"
+
+# Env var → enabled
+CCWATCH_DISCORD_WEBHOOK="https://discord.com/api/webhooks/123/abc"
+_notify_enabled 2>/dev/null
+_assert_eq "enabled via env var" "0" "$?"
+
+# Env var set to "false" → disabled
+CCWATCH_DISCORD_WEBHOOK="false"
+_notify_enabled 2>/dev/null
+_assert_eq "disabled via env=false" "1" "$?"
+
+# File toggle → enabled (even without env var)
+unset CCWATCH_DISCORD_WEBHOOK
+touch "$CACHE/notify_enabled"
+_notify_enabled 2>/dev/null
+_assert_eq "enabled via file toggle" "0" "$?"
+
+# File removed → disabled again
+rm -f "$CACHE/notify_enabled"
+_notify_enabled 2>/dev/null
+_assert_eq "disabled after file removed" "1" "$?"
+
+# ─── 14. Notify cooldown: _notify_cooldown_ok ───────────────────────────────
+echo ""
+echo "=== _notify_cooldown_ok ==="
+
+# Cooldown=0 → always ok
+CCWATCH_NOTIFY_COOLDOWN=0
+_notify_cooldown_ok 2>/dev/null
+_assert_eq "cooldown=0: always ok" "0" "$?"
+
+# Cooldown unset → defaults to 0, always ok
+unset CCWATCH_NOTIFY_COOLDOWN
+_notify_cooldown_ok 2>/dev/null
+_assert_eq "cooldown unset: always ok" "0" "$?"
+
+# Cooldown=9999 with no last_sent → ok (first send)
+CCWATCH_NOTIFY_COOLDOWN=9999
+rm -f "$CACHE/notify_last_sent"
+_notify_cooldown_ok 2>/dev/null
+_assert_eq "cooldown=9999 no prior: ok" "0" "$?"
+
+# Cooldown=9999 with recent last_sent → blocked
+CCWATCH_NOTIFY_COOLDOWN=9999
+date +%s > "$CACHE/notify_last_sent"
+_notify_cooldown_ok 2>/dev/null
+_assert_eq "cooldown=9999 recent: blocked" "1" "$?"
+
+# Cooldown=1 with old last_sent → ok
+CCWATCH_NOTIFY_COOLDOWN=1
+echo "0" > "$CACHE/notify_last_sent"
+_notify_cooldown_ok 2>/dev/null
+_assert_eq "cooldown=1 old: ok" "0" "$?"
+
+# Non-numeric cooldown → treated as 0, always ok
+CCWATCH_NOTIFY_COOLDOWN="abc"
+_notify_cooldown_ok 2>/dev/null
+_assert_eq "cooldown=abc: treated as 0" "0" "$?"
+
+# Restore
+unset CCWATCH_NOTIFY_COOLDOWN
+rm -f "$CACHE/notify_last_sent"
+
+# ─── 15. Notify webhook resolution: _notify_resolve_webhook ─────────────────
+echo ""
+echo "=== _notify_resolve_webhook ==="
+
+# Env var set → returns it
+CCWATCH_DISCORD_WEBHOOK="https://discord.com/api/webhooks/123/abc"
+out=$(_notify_resolve_webhook)
+_assert_eq "env var: returns webhook" "https://discord.com/api/webhooks/123/abc" "$out"
+
+# Env var unset → returns 1 (unless Keychain has it, but we can't mock security easily)
+unset CCWATCH_DISCORD_WEBHOOK
+_notify_resolve_webhook &>/dev/null
+_assert_eq "no env var: fails" "1" "$?"
+
+# Restore
+unset CCWATCH_DISCORD_WEBHOOK
+
+# ─── 16. Notify send: URL validation ────────────────────────────────────────
+echo ""
+echo "=== _notify_send URL validation ==="
+
+# Valid Discord URL — will fail on actual send (no real webhook) but passes URL check
+# We test by checking _notify_send returns 1 when URL is invalid
+CCWATCH_DISCORD_WEBHOOK="https://evil.com/api/webhooks/123/abc"
+out=$(_notify_send "test" "test body" 2>/dev/null)
+_assert_eq "rejects non-discord URL" "1" "$?"
+
+CCWATCH_DISCORD_WEBHOOK="http://discord.com/api/webhooks/123/abc"
+out=$(_notify_send "test" "test body" 2>/dev/null)
+_assert_eq "rejects http (non-https)" "1" "$?"
+
+CCWATCH_DISCORD_WEBHOOK="https://discord.com/not-webhooks/123"
+out=$(_notify_send "test" "test body" 2>/dev/null)
+_assert_eq "rejects wrong path" "1" "$?"
+
+# Restore
+unset CCWATCH_DISCORD_WEBHOOK
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
 _summary

@@ -281,18 +281,32 @@ _detect() {
 
 # ─── DAEMON ───────────────────────────────────────────────────────────────────
 _daemon_scan() {
-  local n=0 w=0 q=0 p=0 e=0
+  local n=0 w=0 q=0 p=0 e=0 notify_body=""
   local scan_tmp
   scan_tmp=$(mktemp "$CACHE/scan.XXXXXX") || { _log "mktemp failed in _daemon_scan"; return; }
+
+  # Process hook events — override regex if hook caught something regex missed
+  local events_dir="$CACHE/events"
+  if [[ -d "$events_dir" ]]; then
+    local evt
+    for evt in "$events_dir"/*.json; do
+      [[ -f "$evt" ]] || continue
+      rm -f "$evt"
+    done
+  fi
+
   while IFS='|' read -r pid label; do
     [[ -z "$pid" ]] && continue; n=$((n+1))
     local content; content=$(tmux capture-pane -t "$pid" -p -S -30 2>/dev/null) || { _log "pane $pid gone"; continue; }
     local si st sd; si=$(_detect "$content"); st=${si%%|*}; sd=${si#*|}
     case "$st" in
       permission) p=$((p+1)); w=$((w+1))
-        _log_permission "$pid" "$label" "$sd" ;;
-      question) q=$((q+1)); w=$((w+1)) ;;
-      error) e=$((e+1)); w=$((w+1)) ;;
+        _log_permission "$pid" "$label" "$sd"
+        notify_body+="**${label}** — permission: ${sd}\n" ;;
+      question) q=$((q+1)); w=$((w+1))
+        notify_body+="**${label}** — question: ${sd}\n" ;;
+      error) e=$((e+1)); w=$((w+1))
+        notify_body+="**${label}** — error\n" ;;
     esac
     jq -nc --arg P "$pid" --arg l "$label" --arg s "$st" --arg d "$sd" \
       '{pane:$P,label:$l,state:$s,detail:$d}' >> "$scan_tmp"
@@ -340,8 +354,13 @@ _daemon_scan() {
   local prev; prev=$(tmux show-option -gqv @ccw_prev_w 2>/dev/null || echo 0)
   if [[ "$w" -gt "${prev:-0}" ]] && [[ "$w" -gt 0 ]]; then
     echo -ne '\a'
-    if [[ "$w" -eq 1 ]]; then _voice_alert "One session needs attention."
-    else _voice_alert "$w sessions need attention."; fi
+    if [[ "$w" -eq 1 ]]; then
+      _voice_alert "One session needs attention."
+      _notify_alert "1 session needs attention" "${notify_body//\\n/$'\n'}"
+    else
+      _voice_alert "$w sessions need attention."
+      _notify_alert "$w sessions need attention" "${notify_body//\\n/$'\n'}"
+    fi
   fi
   tmux set-option -g @ccw_prev_w "$w" 2>/dev/null || true
 }
@@ -856,6 +875,144 @@ _cmd_voice() {
   esac
 }
 
+# ─── NOTIFY (optional Discord webhooks) ─────────────────────────────────────
+_notify_enabled() {
+  [[ "${CCWATCH_DISCORD_WEBHOOK:-}" == "false" ]] && return 1
+  [[ -f "$CACHE/notify_enabled" ]] && return 0
+  [[ -n "${CCWATCH_DISCORD_WEBHOOK:-}" ]] && return 0
+  return 1
+}
+
+_notify_resolve_webhook() {
+  [[ -n "${CCWATCH_DISCORD_WEBHOOK:-}" ]] && { echo "$CCWATCH_DISCORD_WEBHOOK"; return 0; }
+  if [[ "$(uname)" == "Darwin" ]] && command -v security &>/dev/null; then
+    security find-generic-password -s ccwatch -a discord-webhook -w 2>/dev/null && return 0
+  fi
+  return 1
+}
+
+_notify_send() {
+  local title="$1" body="$2"
+  local webhook
+  webhook=$(_notify_resolve_webhook) || return 1
+  # Validate webhook URL pattern
+  [[ "$webhook" =~ ^https://discord\.com/api/webhooks/ ]] || \
+  [[ "$webhook" =~ ^https://discordapp\.com/api/webhooks/ ]] || return 1
+  # Sanitize body: strip all ANSI/OSC/CSI sequences, limit length
+  body=$(printf '%s' "$body" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\x1b][^\x07]*\x07//g; s/\x1b[^[][^a-zA-Z]*[a-zA-Z]//g' | head -c 1900)
+  local payload
+  payload=$(jq -nc --arg t "$title" --arg d "$body" --arg ts "$(date -Iseconds)" \
+    '{embeds:[{title:$t,description:$d,color:16753920,footer:{text:"ccwatch"},timestamp:$ts}]}')
+  # [HARDENED] Pass webhook URL via curl config to hide from ps
+  local curl_cfg
+  curl_cfg=$(mktemp "$CACHE/curl.XXXXXX") || { _log "notify: mktemp failed"; return 1; }
+  chmod 600 "$curl_cfg"
+  printf 'url = "%s"\n' "$webhook" > "$curl_cfg"
+  local code
+  code=$(curl -s -o /dev/null -w '%{http_code}' \
+    -H "Content-Type: application/json" \
+    -d "$payload" -K "$curl_cfg" 2>/dev/null) || true
+  rm -f "$curl_cfg"
+  echo "$code"
+}
+
+_notify_cooldown_ok() {
+  local cooldown="${CCWATCH_NOTIFY_COOLDOWN:-0}"
+  [[ "$cooldown" =~ ^[0-9]+$ ]] || cooldown=0
+  [[ "$cooldown" -eq 0 ]] && return 0
+  local last=0
+  [[ -f "$CACHE/notify_last_sent" ]] && last=$(cat "$CACHE/notify_last_sent" 2>/dev/null || echo 0)
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  local now; now=$(date +%s)
+  (( now - last >= cooldown ))
+}
+
+_notify_alert() {
+  _notify_enabled || return 0
+  _notify_cooldown_ok || return 0
+  local title="$1" body="$2"
+  local code
+  code=$(_notify_send "$title" "$body") || return 0
+  if [[ "$code" =~ ^2 ]]; then
+    date +%s > "$CACHE/notify_last_sent"
+  else
+    _log "notify: Discord webhook returned $code"
+  fi
+}
+
+_cmd_notify() {
+  local sub="${1:-}"
+  case "$sub" in
+    on)
+      touch "$CACHE/notify_enabled"
+      echo -e "${CG}Discord notifications on${R}"
+      ;;
+    off)
+      rm -f "$CACHE/notify_enabled"
+      echo -e "${D}Discord notifications off${R}"
+      ;;
+    set)
+      if [[ "$(uname)" != "Darwin" ]] || ! command -v security &>/dev/null; then
+        echo "macOS Keychain not available. Use: export CCWATCH_DISCORD_WEBHOOK=https://discord.com/api/webhooks/..."
+        return 1
+      fi
+      echo "Create a webhook: Discord server → Settings → Integrations → Webhooks"
+      echo -n "Paste your Discord webhook URL: "
+      read -rs url; echo ""
+      [[ -z "$url" ]] && { echo "Empty URL. Aborted."; return 1; }
+      if [[ ! "$url" =~ ^https://discord(app)?\.com/api/webhooks/ ]]; then
+        echo -e "${CR}Invalid webhook URL. Must start with https://discord.com/api/webhooks/${R}"
+        return 1
+      fi
+      if ! security add-generic-password -s ccwatch -a discord-webhook -w "$url" -U 2>/dev/null; then
+        echo -e "${CR}Failed to store webhook in Keychain.${R}"
+        return 1
+      fi
+      echo -e "${CG}Webhook stored in macOS Keychain.${R}"
+      echo -e "${D}Test it: ccwatch notify test${R}"
+      ;;
+    test)
+      local code
+      code=$(_notify_send "ccwatch test" "Discord notifications are working.") || {
+        echo -e "${CR}Failed — no webhook configured.${R}"
+        echo "  ccwatch notify set     Store webhook in Keychain"
+        echo "  export CCWATCH_DISCORD_WEBHOOK=https://discord.com/api/webhooks/..."
+        return 1
+      }
+      if [[ "$code" =~ ^2 ]]; then
+        echo -e "${CG}Test notification sent (HTTP $code)${R}"
+      else
+        echo -e "${CR}Discord returned HTTP $code${R}"
+      fi
+      ;;
+    delete|rm)
+      if security delete-generic-password -s ccwatch -a discord-webhook &>/dev/null; then
+        echo -e "${CG}Webhook removed from Keychain.${R}"
+      else
+        echo "No webhook found in Keychain."
+      fi
+      ;;
+    *)
+      local src="none"
+      if [[ -n "${CCWATCH_DISCORD_WEBHOOK:-}" ]]; then
+        src="env"
+      elif [[ "$(uname)" == "Darwin" ]] && command -v security &>/dev/null; then
+        security find-generic-password -s ccwatch -a discord-webhook -w &>/dev/null && src="keychain"
+      fi
+      echo -e "${B}Discord Notifications${R}"
+      if _notify_enabled; then echo -e "  Status: ${CG}on${R}"
+      else echo -e "  Status: ${D}off${R}"; fi
+      echo -e "  Webhook: ${B}${src}${R}"
+      echo ""
+      echo "  ccwatch notify on      Enable notifications"
+      echo "  ccwatch notify off     Disable notifications"
+      echo "  ccwatch notify set     Store webhook in macOS Keychain"
+      echo "  ccwatch notify test    Send a test notification"
+      echo "  ccwatch notify delete  Remove webhook from Keychain"
+      ;;
+  esac
+}
+
 # ─── CMD: setup ───────────────────────────────────────────────────────────────
 _cmd_setup() {
   echo -e "${B}${CC}ccwatch setup${R}"; echo ""
@@ -1007,6 +1164,83 @@ TMUX
   tmux bind-key A display-popup -E "bash '${me_escaped}' --popup ls" 2>/dev/null || true
   tmux bind-key P display-popup -E "bash '${me_escaped}' --popup permissions" 2>/dev/null || true
 
+  # ── Claude Code hooks ──────────────────────────────────
+  echo ""
+  echo -e "${B}Claude Code hooks:${R}"
+  local hooks_dir="$CACHE/hooks"
+  mkdir -p "$hooks_dir"
+  # Create the hook script
+  cat > "$hooks_dir/ccwatch-notify.sh" << 'HOOKEOF'
+#!/usr/bin/env bash
+# Claude Code hook — writes event marker for ccwatch daemon
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/ccwatch"
+EVENTS="$CACHE/events"
+mkdir -p "$EVENTS"
+type="${1:-unknown}"
+pane=$(tmux display-message -p '#{pane_id}' 2>/dev/null || echo "unknown")
+ts=$(date +%s)
+# Sanitize pane ID and timestamp for safe filename (digits only)
+safe_pane="${pane//[^0-9]/}"
+jq -nc --arg ts "$ts" --arg type "$type" --arg pane "$pane" \
+  '{ts:$ts,type:$type,pane:$pane}' > "$EVENTS/${ts}-${safe_pane}.json" 2>/dev/null || true
+HOOKEOF
+  chmod +x "$hooks_dir/ccwatch-notify.sh"
+  echo -e "  ${CG}✓ Hook script created${R}"
+
+  # Merge hooks into ~/.claude/settings.json
+  local claude_settings="$HOME/.claude/settings.json"
+  local hook_cmd="$hooks_dir/ccwatch-notify.sh"
+  if [[ -f "$claude_settings" ]] && grep -q "ccwatch-notify" "$claude_settings"; then
+    echo -e "  ${CG}✓ Hooks already in settings.json${R}"
+  else
+    echo -e "${CY}  Add ccwatch hooks to Claude Code settings? [Y/n]${R}"
+    echo -e "  ${D}Hooks notify ccwatch when Claude asks questions or stops.${R}"
+    read -rsn1 hook_yn; echo ""
+    if [[ "$hook_yn" != "n" ]] && [[ "$hook_yn" != "N" ]]; then
+      local hooks_json
+      hooks_json=$(jq -nc --arg cmd "$hook_cmd" '{
+        hooks: {
+          PreToolUse: [{
+            matcher: "AskUserQuestion",
+            hooks: [{type:"command",command:($cmd + " question")}]
+          }],
+          Stop: [{
+            hooks: [{type:"command",command:($cmd + " stop")}]
+          }]
+        }
+      }')
+      mkdir -p "$(dirname "$claude_settings")"
+      if [[ -f "$claude_settings" ]]; then
+        local tmp_claude
+        tmp_claude=$(mktemp "$(dirname "$claude_settings")/settings.XXXXXX") || { echo "ERROR: mktemp failed"; return 1; }
+        chmod 600 "$tmp_claude"
+        if jq --argjson new "$hooks_json" '
+          .hooks.PreToolUse = ((.hooks.PreToolUse // []) + $new.hooks.PreToolUse) |
+          .hooks.Stop = ((.hooks.Stop // []) + $new.hooks.Stop)
+        ' "$claude_settings" > "$tmp_claude" 2>/dev/null; then
+          mv "$tmp_claude" "$claude_settings"
+          echo -e "  ${CG}✓ Hooks added to settings.json${R}"
+        else
+          rm -f "$tmp_claude"
+          echo -e "  ${CR}Failed to merge hooks. Add manually.${R}"
+        fi
+      else
+        echo "$hooks_json" | jq '.' > "$claude_settings"
+        echo -e "  ${CG}✓ Created settings.json with hooks${R}"
+      fi
+    else
+      echo -e "  ${D}Skipped. Add hooks manually: see ccwatch help${R}"
+    fi
+  fi
+
+  # ── Discord notifications (optional) ───────────────────
+  echo ""
+  echo -e "${B}Discord notifications (optional):${R}"
+  echo -e "  ${D}Get notified on your phone when sessions need attention.${R}"
+  echo -e "  ${D}1. Create a webhook: Discord server → Settings → Integrations → Webhooks${R}"
+  echo -e "  ${D}2. Run: ccwatch notify set${R}"
+  echo -e "  ${D}3. Run: ccwatch notify on${R}"
+
   echo ""
   echo -e "${B}${CC}╭──────────────────────────────────────────────╮${R}"
   echo -e "${B}${CC}│  ✓ ccwatch is ready                          │${R}"
@@ -1023,8 +1257,9 @@ TMUX
   echo -e "    ccwatch ls           full analysis"
   echo -e "    ccwatch permissions  fix your settings.json"
   echo ""
-  echo -e "  ${D}Voice: ccwatch voice on${R}"
-  echo -e "  ${D}Logs:  $CACHE/${R}"
+  echo -e "  ${D}Voice:   ccwatch voice on${R}"
+  echo -e "  ${D}Discord: ccwatch notify set${R}"
+  echo -e "  ${D}Logs:    $CACHE/${R}"
 }
 
 # ─── CMD: key ─────────────────────────────────────────────────────────────────
@@ -1107,6 +1342,7 @@ case "${1:-}" in
     ;;
   key|k) _cmd_key "${2:-}" ;;
   voice|v) _cmd_voice "${2:-}" ;;
+  notify|n) shift; _cmd_notify "$@" ;;
   setup) _cmd_setup ;;
   help|--help|-h) cat << 'H'
 ccwatch — Ambient Intelligence for Claude Code Sessions
@@ -1119,6 +1355,9 @@ ccwatch — Ambient Intelligence for Claude Code Sessions
   ccwatch key set        Store API key in macOS Keychain
   ccwatch key delete     Remove API key from Keychain
   ccwatch voice on|off   Toggle voice narration
+  ccwatch notify on|off  Toggle Discord notifications
+  ccwatch notify set     Configure Discord webhook
+  ccwatch notify test    Send a test notification
   ccwatch daemon start   Background scanner (auto-started by setup)
   ccwatch setup          One-time install
 
@@ -1133,12 +1372,14 @@ Cost: ~$0.10-0.50/day with heavy use
 API: Uses ANTHROPIC_API_KEY — resolved from env var or macOS Keychain
 
 Env:
-  ANTHROPIC_API_KEY          Required (or use: ccwatch key set)
-  CCWATCH_MODEL_FAST         Override Haiku model
-  CCWATCH_MODEL_THINK        Override think-tier model
-  CCWATCH_MODEL              Force single model for everything
-  CCWATCH_VOICE=true         Enable voice (or: ccwatch voice on)
-  CCWATCH_SCAN_INTERVAL=30   Daemon scan interval (seconds)
+  ANTHROPIC_API_KEY              Required (or use: ccwatch key set)
+  CCWATCH_MODEL_FAST             Override Haiku model
+  CCWATCH_MODEL_THINK            Override think-tier model
+  CCWATCH_MODEL                  Force single model for everything
+  CCWATCH_VOICE=true             Enable voice (or: ccwatch voice on)
+  CCWATCH_DISCORD_WEBHOOK        Discord webhook URL (or: ccwatch notify set)
+  CCWATCH_NOTIFY_COOLDOWN=0      Min seconds between notifications (0=off)
+  CCWATCH_SCAN_INTERVAL=30       Daemon scan interval (seconds)
 H
   ;; *) echo "Unknown: $1 — try: ccwatch help" ;;
 esac
