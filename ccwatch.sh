@@ -285,12 +285,17 @@ _daemon_scan() {
   local scan_tmp
   scan_tmp=$(mktemp "$CACHE/scan.XXXXXX") || { _log "mktemp failed in _daemon_scan"; return; }
 
-  # Process hook events — override regex if hook caught something regex missed
+  # Process hook events into a pane→type lookup (bash 3.2: no associative arrays)
   local events_dir="$CACHE/events"
+  local evt_panes=""
   if [[ -d "$events_dir" ]]; then
     local evt
     for evt in "$events_dir"/*.json; do
       [[ -f "$evt" ]] || continue
+      local evt_type evt_pane
+      evt_type=$(jq -r '.type // empty' "$evt" 2>/dev/null) || { rm -f "$evt"; continue; }
+      evt_pane=$(jq -r '.pane // empty' "$evt" 2>/dev/null) || { rm -f "$evt"; continue; }
+      [[ -n "$evt_type" ]] && [[ -n "$evt_pane" ]] && evt_panes+="${evt_pane}=${evt_type}|"
       rm -f "$evt"
     done
   fi
@@ -299,6 +304,16 @@ _daemon_scan() {
     [[ -z "$pid" ]] && continue; n=$((n+1))
     local content; content=$(tmux capture-pane -t "$pid" -p -S -30 2>/dev/null) || { _log "pane $pid gone"; continue; }
     local si st sd; si=$(_detect "$content"); st=${si%%|*}; sd=${si#*|}
+    # Hook override: if regex says working/idle but hook says question/stop, trust the hook
+    if [[ "$st" == "working" || "$st" == "idle" ]] && [[ -n "$evt_panes" ]]; then
+      local hook_type=""
+      hook_type=$(printf '%s' "$evt_panes" | grep -oE "${pid}=[^|]+" | head -1 | cut -d= -f2) || true
+      if [[ "$hook_type" == "question" ]]; then
+        st="question"; sd="(detected via hook)"
+      elif [[ "$hook_type" == "stop" ]]; then
+        st="question"; sd="session stopped — may need input"
+      fi
+    fi
     case "$st" in
       permission) p=$((p+1)); w=$((w+1))
         _log_permission "$pid" "$label" "$sd"
@@ -352,6 +367,8 @@ _daemon_scan() {
   tmux set-option -g @ccw_perms_logged "$pl" 2>/dev/null || true
 
   local prev; prev=$(tmux show-option -gqv @ccw_prev_w 2>/dev/null || echo 0)
+  prev="${prev//[^0-9]/}"
+  [[ -z "$prev" ]] && prev=0
   if [[ "$w" -gt "${prev:-0}" ]] && [[ "$w" -gt 0 ]]; then
     echo -ne '\a'
     if [[ "$w" -eq 1 ]]; then
@@ -891,6 +908,14 @@ _notify_resolve_webhook() {
   return 1
 }
 
+_notify_resolve_user_id() {
+  [[ -n "${CCWATCH_DISCORD_USER_ID:-}" ]] && { echo "$CCWATCH_DISCORD_USER_ID"; return 0; }
+  if [[ "$(uname)" == "Darwin" ]] && command -v security &>/dev/null; then
+    security find-generic-password -s ccwatch -a discord-user-id -w 2>/dev/null && return 0
+  fi
+  return 1
+}
+
 _notify_send() {
   local title="$1" body="$2"
   local webhook
@@ -900,9 +925,16 @@ _notify_send() {
   [[ "$webhook" =~ ^https://discordapp\.com/api/webhooks/ ]] || return 1
   # Sanitize body: strip all ANSI/OSC/CSI sequences, limit length
   body=$(printf '%s' "$body" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\x1b][^\x07]*\x07//g; s/\x1b[^[][^a-zA-Z]*[a-zA-Z]//g' | head -c 1900)
+  local mention_uid=""
+  mention_uid=$(_notify_resolve_user_id 2>/dev/null) || true
   local payload
-  payload=$(jq -nc --arg t "$title" --arg d "$body" --arg ts "$(date -Iseconds)" \
-    '{embeds:[{title:$t,description:$d,color:16753920,footer:{text:"ccwatch"},timestamp:$ts}]}')
+  if [[ -n "$mention_uid" ]] && [[ "$mention_uid" =~ ^[0-9]+$ ]]; then
+    payload=$(jq -nc --arg t "$title" --arg d "$body" --arg ts "$(date -Iseconds)" --arg uid "$mention_uid" \
+      '{content:("<@"+$uid+">"),allowed_mentions:{users:[$uid]},embeds:[{title:$t,description:$d,color:16753920,footer:{text:"ccwatch"},timestamp:$ts}]}')
+  else
+    payload=$(jq -nc --arg t "$title" --arg d "$body" --arg ts "$(date -Iseconds)" \
+      '{embeds:[{title:$t,description:$d,color:16753920,footer:{text:"ccwatch"},timestamp:$ts}]}')
+  fi
   # [HARDENED] Pass webhook URL via curl config to hide from ps
   local curl_cfg
   curl_cfg=$(mktemp "$CACHE/curl.XXXXXX") || { _log "notify: mktemp failed"; return 1; }
@@ -971,6 +1003,26 @@ _cmd_notify() {
       echo -e "${CG}Webhook stored in macOS Keychain.${R}"
       echo -e "${D}Test it: ccwatch notify test${R}"
       ;;
+    set-user)
+      if [[ "$(uname)" != "Darwin" ]] || ! command -v security &>/dev/null; then
+        echo "macOS Keychain not available. Use: export CCWATCH_DISCORD_USER_ID=<your_id>"
+        return 1
+      fi
+      echo "Right-click your name in Discord → Copy User ID (requires Developer Mode)"
+      echo -n "Paste your Discord user ID: "
+      read -r uid; echo ""
+      [[ -z "$uid" ]] && { echo "Empty ID. Aborted."; return 1; }
+      if [[ ! "$uid" =~ ^[0-9]+$ ]]; then
+        echo -e "${CR}Invalid user ID. Must be numeric.${R}"
+        return 1
+      fi
+      if ! security add-generic-password -s ccwatch -a discord-user-id -w "$uid" -U 2>/dev/null; then
+        echo -e "${CR}Failed to store user ID in Keychain.${R}"
+        return 1
+      fi
+      echo -e "${CG}User ID stored in macOS Keychain.${R}"
+      echo -e "${D}Notifications will now mention you directly.${R}"
+      ;;
     test)
       local code
       code=$(_notify_send "ccwatch test" "Discord notifications are working.") || {
@@ -999,16 +1051,24 @@ _cmd_notify() {
       elif [[ "$(uname)" == "Darwin" ]] && command -v security &>/dev/null; then
         security find-generic-password -s ccwatch -a discord-webhook -w &>/dev/null && src="keychain"
       fi
+      local uid_src="none"
+      if [[ -n "${CCWATCH_DISCORD_USER_ID:-}" ]]; then
+        uid_src="env"
+      elif [[ "$(uname)" == "Darwin" ]] && command -v security &>/dev/null; then
+        _notify_resolve_user_id &>/dev/null && uid_src="keychain"
+      fi
       echo -e "${B}Discord Notifications${R}"
       if _notify_enabled; then echo -e "  Status: ${CG}on${R}"
       else echo -e "  Status: ${D}off${R}"; fi
       echo -e "  Webhook: ${B}${src}${R}"
+      echo -e "  Mention: ${B}${uid_src}${R}"
       echo ""
-      echo "  ccwatch notify on      Enable notifications"
-      echo "  ccwatch notify off     Disable notifications"
-      echo "  ccwatch notify set     Store webhook in macOS Keychain"
-      echo "  ccwatch notify test    Send a test notification"
-      echo "  ccwatch notify delete  Remove webhook from Keychain"
+      echo "  ccwatch notify on       Enable notifications"
+      echo "  ccwatch notify off      Disable notifications"
+      echo "  ccwatch notify set      Store webhook in macOS Keychain"
+      echo "  ccwatch notify set-user Store Discord user ID for @mention"
+      echo "  ccwatch notify test     Send a test notification"
+      echo "  ccwatch notify delete   Remove webhook from Keychain"
       ;;
   esac
 }

@@ -556,6 +556,102 @@ _assert_eq "rejects wrong path" "1" "$?"
 # Restore
 unset CCWATCH_DISCORD_WEBHOOK
 
+# ─── 17. prev sanitization ────────────────────────────────────────────────────
+echo ""
+echo "=== prev sanitization ==="
+
+# Trailing newline stripped
+prev=$'0\n'
+prev="${prev//[^0-9]/}"
+[[ -z "$prev" ]] && prev=0
+_assert_eq "prev: trailing newline stripped" "0" "$prev"
+
+# Trailing carriage return stripped
+prev=$'3\r'
+prev="${prev//[^0-9]/}"
+[[ -z "$prev" ]] && prev=0
+_assert_eq "prev: trailing CR stripped" "3" "$prev"
+
+# Spaces stripped
+prev="  5  "
+prev="${prev//[^0-9]/}"
+[[ -z "$prev" ]] && prev=0
+_assert_eq "prev: spaces stripped" "5" "$prev"
+
+# Empty value defaults to 0
+prev=""
+prev="${prev//[^0-9]/}"
+[[ -z "$prev" ]] && prev=0
+_assert_eq "prev: empty defaults to 0" "0" "$prev"
+
+# Non-numeric value defaults to 0
+prev="abc"
+prev="${prev//[^0-9]/}"
+[[ -z "$prev" ]] && prev=0
+_assert_eq "prev: non-numeric defaults to 0" "0" "$prev"
+
+# ─── 18. Hook event override ──────────────────────────────────────────────────
+echo ""
+echo "=== Hook event override ==="
+
+# Build evt_panes from mock event files
+evt_test_dir="$TEST_CACHE/evt_test"
+mkdir -p "$evt_test_dir"
+echo '{"type":"question","pane":"%42"}' > "$evt_test_dir/evt1.json"
+echo '{"type":"stop","pane":"%99"}' > "$evt_test_dir/evt2.json"
+
+# Parse events the same way _daemon_scan does
+evt_panes=""
+for evt in "$evt_test_dir"/*.json; do
+  [[ -f "$evt" ]] || continue
+  evt_type=$(jq -r '.type // empty' "$evt" 2>/dev/null) || continue
+  evt_pane=$(jq -r '.pane // empty' "$evt" 2>/dev/null) || continue
+  [[ -n "$evt_type" ]] && [[ -n "$evt_pane" ]] && evt_panes+="${evt_pane}=${evt_type}|"
+  rm -f "$evt"
+done
+
+_assert_match "evt_panes: contains question event" "%42=question" "$evt_panes"
+_assert_match "evt_panes: contains stop event" "%99=stop" "$evt_panes"
+
+# Simulate hook override for a "working" pane
+st="working"; pid="%42"
+if [[ "$st" == "working" || "$st" == "idle" ]] && [[ -n "$evt_panes" ]]; then
+  hook_type=$(printf '%s' "$evt_panes" | grep -oE "${pid}=[^|]+" | head -1 | cut -d= -f2) || true
+  if [[ "$hook_type" == "question" ]]; then
+    st="question"
+  elif [[ "$hook_type" == "stop" ]]; then
+    st="question"
+  fi
+fi
+_assert_eq "hook override: working→question" "question" "$st"
+
+# Simulate hook override for "stop" event
+st="idle"; pid="%99"
+if [[ "$st" == "working" || "$st" == "idle" ]] && [[ -n "$evt_panes" ]]; then
+  hook_type=$(printf '%s' "$evt_panes" | grep -oE "${pid}=[^|]+" | head -1 | cut -d= -f2) || true
+  if [[ "$hook_type" == "question" ]]; then
+    st="question"
+  elif [[ "$hook_type" == "stop" ]]; then
+    st="question"
+  fi
+fi
+_assert_eq "hook override: stop→question" "question" "$st"
+
+# Pane not in events → state unchanged
+st="working"; pid="%77"
+if [[ "$st" == "working" || "$st" == "idle" ]] && [[ -n "$evt_panes" ]]; then
+  hook_type=$(printf '%s' "$evt_panes" | grep -oE "${pid}=[^|]+" | head -1 | cut -d= -f2) || true
+  if [[ "$hook_type" == "question" ]]; then
+    st="question"
+  elif [[ "$hook_type" == "stop" ]]; then
+    st="question"
+  fi
+fi
+_assert_eq "no hook: state unchanged" "working" "$st"
+
+# Event files cleaned up
+_assert_eq "event files cleaned up" "0" "$(ls "$evt_test_dir"/*.json 2>/dev/null | wc -l | tr -d ' ')"
+
 # ─── Summary ─────────────────────────────────────────────────────────────────
 _summary
 exit $?
