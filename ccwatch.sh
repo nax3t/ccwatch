@@ -960,12 +960,13 @@ _notify_cooldown_ok() {
 }
 
 _notify_alert() {
-  _notify_enabled || return 0
-  _notify_cooldown_ok || return 0
+  _notify_enabled || { _log "notify: disabled"; return 0; }
+  _notify_cooldown_ok || { _log "notify: cooldown active"; return 0; }
   local title="$1" body="$2"
   local code
-  code=$(_notify_send "$title" "$body") || return 0
+  code=$(_notify_send "$title" "$body") || { _log "notify: _notify_send failed (exit $?)"; return 0; }
   if [[ "$code" =~ ^2 ]]; then
+    _log "notify: sent (HTTP $code)"
     date +%s > "$CACHE/notify_last_sent"
   else
     _log "notify: Discord webhook returned $code"
