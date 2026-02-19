@@ -977,7 +977,7 @@ _notify_send() {
   local mention_uid=""
   mention_uid=$(_notify_resolve_user_id 2>/dev/null) || true
   local fallback_text="$title: $body"
-  mention_uid="${mention_uid^^}"
+  mention_uid=$(printf '%s' "$mention_uid" | tr '[:lower:]' '[:upper:]')
   if [[ -n "$mention_uid" ]] && [[ "$mention_uid" =~ ^[A-Z0-9]+$ ]]; then
     fallback_text="<@${mention_uid}> ${fallback_text}"
   fi
