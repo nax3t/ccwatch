@@ -99,7 +99,7 @@ _extract_fn() {
 for fn in _validate_model _validate_pane_id _check_api _check_deps \
           _detect _sbadge _cbar _read_state _statusbar _rotate_if_large \
           _voice_enabled _voice_alert _voice_summary _log _log_permission _resolve_api_key \
-          _notify_enabled _notify_resolve_webhook _notify_resolve_user_id _notify_send _notify_cooldown_ok _notify_alert \
+          _notify_enabled _notify_resolve_webhook _notify_resolve_user_id _notify_send _notify_cooldown_ok _notify_summarize _notify_alert \
           _bell_enabled; do
   eval "$(_extract_fn "$fn")"
 done
@@ -727,6 +727,50 @@ _assert_eq "disabled after file removed" "1" "$?"
 
 # Restore
 CCWATCH_BELL="false"
+
+# ─── 16e. Obsidian filter: rejects script/iframe/javascript/embed ────────────
+echo ""
+echo "=== Obsidian filter ==="
+
+# Test the expanded grep pattern used in notes validation
+_obsidian_filter() {
+  grep -qE '<%|```dataviewjs|obsidian://|<script|<iframe|javascript:|<embed' <<< "$1"
+}
+
+_assert_exit "obsidian: rejects <%" 0 _obsidian_filter '# Note\n<% evil %>'
+_assert_exit "obsidian: rejects dataviewjs" 0 _obsidian_filter '# Note\n```dataviewjs\nfoo\n```'
+_assert_exit "obsidian: rejects obsidian://" 0 _obsidian_filter '# Note\n[link](obsidian://open)'
+_assert_exit "obsidian: rejects <script" 0 _obsidian_filter '# Note\n<script>alert(1)</script>'
+_assert_exit "obsidian: rejects <iframe" 0 _obsidian_filter '# Note\n<iframe src="evil">'
+_assert_exit "obsidian: rejects javascript:" 0 _obsidian_filter '# Note\n[click](javascript:alert(1))'
+_assert_exit "obsidian: rejects <embed" 0 _obsidian_filter '# Note\n<embed src="evil">'
+_assert_exit "obsidian: allows clean content" 1 _obsidian_filter '# Daily Note\n- Did some work\n- Fixed a bug'
+
+# ─── 16f. Notify summarize: fallback when API unavailable ──────────────────
+echo ""
+echo "=== _notify_summarize ==="
+
+# No API key → returns 1 (fallback)
+_summarize_no_key() {
+  unset ANTHROPIC_API_KEY
+  _notify_summarize "test content"
+}
+_assert_exit "summarize: no API key → fallback" 1 _summarize_no_key
+
+# With API key but _call fails → returns 1
+_summarize_bad_call() {
+  ANTHROPIC_API_KEY="sk-ant-test-key-000000"
+  # _call will fail because there's no real API endpoint in test
+  _call() { return 1; }
+  _notify_summarize "test content"
+  local rc=$?
+  unset -f _call
+  return $rc
+}
+_assert_exit "summarize: API call fails → fallback" 1 _summarize_bad_call
+
+# Restore key
+ANTHROPIC_API_KEY="sk-ant-test-key-000000"
 
 # ─── 17. prev sanitization ────────────────────────────────────────────────────
 echo ""

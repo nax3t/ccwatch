@@ -154,7 +154,7 @@ _check_api() {
   }
   if [[ ! "$ANTHROPIC_API_KEY" =~ ^sk-ant- ]]; then
     echo "WARNING: ANTHROPIC_API_KEY doesn't look like a valid key (expected sk-ant-...)." >&2
-    echo "  Current value starts with: ${ANTHROPIC_API_KEY:0:10}..." >&2
+    echo "  Current value starts with: ${ANTHROPIC_API_KEY:0:7}..." >&2
     echo "  If using macOS Keychain, ensure you use: security find-generic-password -w ..." >&2
   fi
 }
@@ -293,7 +293,7 @@ _detect() {
 
 # ─── DAEMON ───────────────────────────────────────────────────────────────────
 _daemon_scan() {
-  local n=0 w=0 q=0 p=0 e=0 notify_body=""
+  local n=0 w=0 q=0 p=0 e=0 notify_body="" notify_raw=""
   local scan_tmp
   scan_tmp=$(mktemp "$CACHE/scan.XXXXXX") || { _log "mktemp failed in _daemon_scan"; return; }
 
@@ -326,19 +326,22 @@ _daemon_scan() {
         st="question"; sd="session stopped — may need input"
       fi
     fi
-    # Grab last few non-empty lines for notification context
-    local tail_lines=""
+    # Accumulate raw content for AI summarization
+    local pane_content=""
     if [[ "$st" == "permission" || "$st" == "question" || "$st" == "error" ]]; then
-      tail_lines=$(printf '%s' "$content" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\x1b][^\x07]*\x07//g' | grep -v '^[[:space:]_─━═╭╮╰╯│┃▰▱░▒▓·•―—\-]*$' | tail -4 | head -c 300)
+      pane_content=$(printf '%s' "$content" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\x1b][^\x07]*\x07//g' | grep -v '^[[:space:]_─━═╭╮╰╯│┃▰▱░▒▓·•―—\-]*$' | tail -8 | head -c 500)
     fi
     case "$st" in
       permission) p=$((p+1)); w=$((w+1))
         _log_permission "$pid" "$label" "$sd"
-        notify_body+="${label} — permission"$'\n'"${tail_lines}"$'\n\n' ;;
+        notify_body+="${label} — permission"$'\n'"${pane_content}"$'\n\n'
+        notify_raw+="[${label}]"$'\n'"${pane_content}"$'\n\n' ;;
       question) q=$((q+1)); w=$((w+1))
-        notify_body+="${label} — question"$'\n'"${tail_lines}"$'\n\n' ;;
+        notify_body+="${label} — question"$'\n'"${pane_content}"$'\n\n'
+        notify_raw+="[${label}]"$'\n'"${pane_content}"$'\n\n' ;;
       error) e=$((e+1)); w=$((w+1))
-        notify_body+="${label} — error"$'\n'"${tail_lines}"$'\n\n' ;;
+        notify_body+="${label} — error"$'\n'"${pane_content}"$'\n\n'
+        notify_raw+="[${label}]"$'\n'"${pane_content}"$'\n\n' ;;
     esac
     jq -nc --arg P "$pid" --arg l "$label" --arg s "$st" --arg d "$sd" \
       '{pane:$P,label:$l,state:$s,detail:$d}' >> "$scan_tmp"
@@ -389,12 +392,19 @@ _daemon_scan() {
   if [[ "$w" -gt "${prev:-0}" ]] && [[ "$w" -gt 0 ]]; then
     echo -ne '\a'
     _bell_alert
+    # Try AI summarization for cleaner, safer notifications
+    local summary_body="$notify_body"
+    if _notify_enabled 2>/dev/null && [[ -n "$notify_raw" ]]; then
+      local ai_summary
+      ai_summary=$(_notify_summarize "$notify_raw" 2>/dev/null) || true
+      [[ -n "$ai_summary" ]] && summary_body="$ai_summary"
+    fi
     if [[ "$w" -eq 1 ]]; then
       _voice_alert "One session needs attention."
-      _notify_alert "1 session needs attention" "$notify_body"
+      _notify_alert "1 session needs attention" "$summary_body"
     else
       _voice_alert "$w sessions need attention."
-      _notify_alert "$w sessions need attention" "$notify_body"
+      _notify_alert "$w sessions need attention" "$summary_body"
     fi
   fi
   tmux set-option -g @ccw_prev_w "$w" 2>/dev/null || true
@@ -993,7 +1003,9 @@ _notify_send() {
   local curl_cfg
   curl_cfg=$(mktemp "$CACHE/curl.XXXXXX") || { _log "notify: mktemp failed"; return 1; }
   chmod 600 "$curl_cfg"
-  printf 'url = "%s"\n' "$webhook" > "$curl_cfg"
+  local escaped_webhook="${webhook//\\/\\\\}"
+  escaped_webhook="${escaped_webhook//\"/\\\"}"
+  printf 'url = "%s"\n' "$escaped_webhook" > "$curl_cfg"
   local code
   code=$(curl -s -o /dev/null -w '%{http_code}' \
     -H "Content-Type: application/json" \
@@ -1011,6 +1023,22 @@ _notify_cooldown_ok() {
   [[ "$last" =~ ^[0-9]+$ ]] || last=0
   local now; now=$(date +%s)
   (( now - last >= cooldown ))
+}
+
+_notify_summarize() {
+  local raw_content="$1"
+  # Require API key; fall back to empty (caller uses label-only fallback)
+  [[ -n "${ANTHROPIC_API_KEY:-}" ]] || return 1
+  local sys="You summarize terminal output from Claude Code sessions for a Slack push notification. Rules:
+- Produce 1-2 sentences per session describing what it needs from the user
+- Redact anything sensitive: API keys, tokens, passwords, webhook URLs, credentials, env var values, secret file paths
+- Keep it glanceable — this is a phone push notification
+- No markdown formatting, no code blocks
+- If you can't tell what's needed, say 'needs attention'"
+  local result
+  result=$(_call "fast" "$sys" "$raw_content" 150 2>/dev/null) || return 1
+  [[ -n "$result" ]] || return 1
+  printf '%s' "$result"
 }
 
 _notify_alert() {
@@ -1677,7 +1705,7 @@ TMPL
     echo "ERROR: Response too large (${#result} chars)" >&2; return 1
   fi
   # S4b: Reject responses containing Obsidian-executable directives
-  if grep -qE '<%|```dataviewjs|obsidian://' <<< "$result"; then
+  if grep -qE '<%|```dataviewjs|obsidian://|<script|<iframe|javascript:|<embed' <<< "$result"; then
     _log "notes: API response contained suspicious Obsidian directives, rejecting"
     echo "ERROR: Response contained suspicious content" >&2; return 1
   fi

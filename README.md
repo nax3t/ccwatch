@@ -130,6 +130,8 @@ The daemon sends a notification when the **waiting session count increases**. Yo
 
 You won't get notified for sessions that are working normally, finish successfully, or if the waiting count stays the same.
 
+When `ANTHROPIC_API_KEY` is set, notification bodies are summarized by Haiku (~$0.001/notification) into a clean 1-2 sentence description per session, with sensitive content (API keys, tokens, file paths) automatically redacted. If the API key is not set or the call fails, notifications fall back to the raw label + state type.
+
 ### Optional: @mentions for mobile push
 
 If you're sending notifications to a **channel** (not your DM), add your Slack member ID so you get @mentioned and receive mobile push notifications:
@@ -193,7 +195,7 @@ All config is optional. Defaults work out of the box.
 
 | Variable | Default | What |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | (required) | API key — or use `ccwatch key set` for Keychain |
+| `ANTHROPIC_API_KEY` | (required) | API key — or use `ccwatch key set` for Keychain. Also enables AI-summarized Slack notifications |
 | `CCWATCH_MODEL_FAST` | `claude-haiku-4-5-20251001` | Model for fast tier |
 | `CCWATCH_MODEL_THINK` | `claude-sonnet-4-6-20250527` | Model for analysis (ls, status, permissions) |
 | `CCWATCH_MODEL` | (none) | Override: force one model for everything |
