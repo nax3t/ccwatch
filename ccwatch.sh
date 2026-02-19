@@ -1555,18 +1555,25 @@ _notes_gather_all() {
 
 _NOTES_SYSTEM='You update an Obsidian daily note with Claude Code session activity data.
 
+Structure (top to bottom):
+1. **Status** — one line per active agent: "- **agentN** on `branch` — [current status phrase]". Status reflects the LATEST activity (e.g. "implementing auth grid" not "started work").
+2. **Per-agent sections** — each active agent gets an ## agentN section containing:
+   - Branch name as a bold line
+   - Bulleted accomplishments (past tense, grouped by outcome not by tool call)
+   - "Currently:" line if there is clearly in-progress work
+   - Do NOT create sections for agents with no activity today
+3. **Open Items** — single section replacing Decisions/Blockers/Follow-ups. Only include when data evidences them. Prefix: "- **Decision:** ...", "- **Blocker:** ...", "- **Follow-up:** ...". Omit the section entirely if empty.
+4. **Notes** — freeform section for manual entries (always preserved)
+5. **Timeline** — chronological "- **HH:MM** [agentN] description" entries as a reference appendix. LAST section.
+
 Rules:
 - PRESERVE all existing manually-written content in the note. Never remove or modify manual entries.
-- MERGE new session data into the correct template sections.
-- Work Log format: "- **HH:MM** - [agentN] description of what was done" (use UTC timestamps converted to local intuition, or just the hour)
-- Active Branches: one bullet per agent with branch name and brief status
-- Only add Decisions/Blockers/Follow-ups entries if clearly evidenced in the data
-- Keep %% %% Obsidian comments in sections that remain empty
-- Work Log should be the LAST section in the note
+- MERGE new session data into the correct sections.
+- Keep %% %% Obsidian comments in sections that remain empty (Status, Notes, Timeline)
 - Output the COMPLETE note — no markdown fences, no preamble, no explanation
 - Be concise — summarize tool usage patterns (e.g. "edited 5 files in products/"), do not list every tool call
-- Group related prompts into single work log entries where possible
-- If a work log entry already exists for an agent at a similar time, do not duplicate it'
+- Group related prompts into single timeline entries where possible
+- If a timeline entry already exists for an agent at a similar time, do not duplicate it'
 
 _notes_generate() {
   local dry_run="${1:-0}"
@@ -1596,11 +1603,14 @@ _notes_generate() {
       cat > "$tmp_init" << TMPL
 # ${today} ${day_name}
 
-## Active Branches
-%% Per-agent/worktree status %%
+## Status
+%% One-line status per agent — auto-generated %%
 
-## Work Log
-%% Chronological entries of what you worked on %%
+## Notes
+%% Manual notes, links, context %%
+
+## Timeline
+%% Chronological log of all activity %%
 TMPL
     fi
     chmod 644 "$tmp_init"
