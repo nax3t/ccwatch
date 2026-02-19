@@ -451,23 +451,23 @@ echo ""
 echo "=== _notify_enabled ==="
 
 # Neither env var nor file → disabled
-unset CCWATCH_DISCORD_WEBHOOK
+unset CCWATCH_SLACK_WEBHOOK
 rm -f "$CACHE/notify_enabled"
 _notify_enabled 2>/dev/null
 _assert_eq "disabled by default" "1" "$?"
 
 # Env var → enabled
-CCWATCH_DISCORD_WEBHOOK="https://discord.com/api/webhooks/123/abc"
+CCWATCH_SLACK_WEBHOOK="https://hooks.slack.com/services/T00/B00/xxxx"
 _notify_enabled 2>/dev/null
 _assert_eq "enabled via env var" "0" "$?"
 
 # Env var set to "false" → disabled
-CCWATCH_DISCORD_WEBHOOK="false"
+CCWATCH_SLACK_WEBHOOK="false"
 _notify_enabled 2>/dev/null
 _assert_eq "disabled via env=false" "1" "$?"
 
 # File toggle → enabled (even without env var)
-unset CCWATCH_DISCORD_WEBHOOK
+unset CCWATCH_SLACK_WEBHOOK
 touch "$CACHE/notify_enabled"
 _notify_enabled 2>/dev/null
 _assert_eq "enabled via file toggle" "0" "$?"
@@ -523,38 +523,38 @@ echo ""
 echo "=== _notify_resolve_webhook ==="
 
 # Env var set → returns it
-CCWATCH_DISCORD_WEBHOOK="https://discord.com/api/webhooks/123/abc"
+CCWATCH_SLACK_WEBHOOK="https://hooks.slack.com/services/T00/B00/xxxx"
 out=$(_notify_resolve_webhook)
-_assert_eq "env var: returns webhook" "https://discord.com/api/webhooks/123/abc" "$out"
+_assert_eq "env var: returns webhook" "https://hooks.slack.com/services/T00/B00/xxxx" "$out"
 
 # Env var unset → returns 1 (unless Keychain has it, but we can't mock security easily)
-unset CCWATCH_DISCORD_WEBHOOK
+unset CCWATCH_SLACK_WEBHOOK
 _notify_resolve_webhook &>/dev/null
 _assert_eq "no env var: fails" "1" "$?"
 
 # Restore
-unset CCWATCH_DISCORD_WEBHOOK
+unset CCWATCH_SLACK_WEBHOOK
 
 # ─── 16. Notify send: URL validation ────────────────────────────────────────
 echo ""
 echo "=== _notify_send URL validation ==="
 
-# Valid Discord URL — will fail on actual send (no real webhook) but passes URL check
+# Valid Slack URL — will fail on actual send (no real webhook) but passes URL check
 # We test by checking _notify_send returns 1 when URL is invalid
-CCWATCH_DISCORD_WEBHOOK="https://evil.com/api/webhooks/123/abc"
+CCWATCH_SLACK_WEBHOOK="https://evil.com/services/T00/B00/xxxx"
 out=$(_notify_send "test" "test body" 2>/dev/null)
-_assert_eq "rejects non-discord URL" "1" "$?"
+_assert_eq "rejects non-slack URL" "1" "$?"
 
-CCWATCH_DISCORD_WEBHOOK="http://discord.com/api/webhooks/123/abc"
+CCWATCH_SLACK_WEBHOOK="http://hooks.slack.com/services/T00/B00/xxxx"
 out=$(_notify_send "test" "test body" 2>/dev/null)
 _assert_eq "rejects http (non-https)" "1" "$?"
 
-CCWATCH_DISCORD_WEBHOOK="https://discord.com/not-webhooks/123"
+CCWATCH_SLACK_WEBHOOK="https://hooks.slack.com/not-services/T00"
 out=$(_notify_send "test" "test body" 2>/dev/null)
 _assert_eq "rejects wrong path" "1" "$?"
 
 # Restore
-unset CCWATCH_DISCORD_WEBHOOK
+unset CCWATCH_SLACK_WEBHOOK
 
 # ─── 17. prev sanitization ────────────────────────────────────────────────────
 echo ""

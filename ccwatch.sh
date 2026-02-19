@@ -942,26 +942,26 @@ _cmd_bell() {
   esac
 }
 
-# ─── NOTIFY (optional Discord webhooks) ─────────────────────────────────────
+# ─── NOTIFY (optional Slack webhooks) ─────────────────────────────────────
 _notify_enabled() {
-  [[ "${CCWATCH_DISCORD_WEBHOOK:-}" == "false" ]] && return 1
+  [[ "${CCWATCH_SLACK_WEBHOOK:-}" == "false" ]] && return 1
   [[ -f "$CACHE/notify_enabled" ]] && return 0
-  [[ -n "${CCWATCH_DISCORD_WEBHOOK:-}" ]] && return 0
+  [[ -n "${CCWATCH_SLACK_WEBHOOK:-}" ]] && return 0
   return 1
 }
 
 _notify_resolve_webhook() {
-  [[ -n "${CCWATCH_DISCORD_WEBHOOK:-}" ]] && { echo "$CCWATCH_DISCORD_WEBHOOK"; return 0; }
+  [[ -n "${CCWATCH_SLACK_WEBHOOK:-}" ]] && { echo "$CCWATCH_SLACK_WEBHOOK"; return 0; }
   if [[ "$(uname)" == "Darwin" ]] && command -v security &>/dev/null; then
-    security find-generic-password -s ccwatch -a discord-webhook -w 2>/dev/null && return 0
+    security find-generic-password -s ccwatch -a slack-webhook -w 2>/dev/null && return 0
   fi
   return 1
 }
 
 _notify_resolve_user_id() {
-  [[ -n "${CCWATCH_DISCORD_USER_ID:-}" ]] && { echo "$CCWATCH_DISCORD_USER_ID"; return 0; }
+  [[ -n "${CCWATCH_SLACK_USER_ID:-}" ]] && { echo "$CCWATCH_SLACK_USER_ID"; return 0; }
   if [[ "$(uname)" == "Darwin" ]] && command -v security &>/dev/null; then
-    security find-generic-password -s ccwatch -a discord-user-id -w 2>/dev/null && return 0
+    security find-generic-password -s ccwatch -a slack-user-id -w 2>/dev/null && return 0
   fi
   return 1
 }
@@ -971,20 +971,18 @@ _notify_send() {
   local webhook
   webhook=$(_notify_resolve_webhook) || return 1
   # Validate webhook URL pattern
-  [[ "$webhook" =~ ^https://discord\.com/api/webhooks/ ]] || \
-  [[ "$webhook" =~ ^https://discordapp\.com/api/webhooks/ ]] || return 1
+  [[ "$webhook" =~ ^https://hooks\.slack\.com/services/ ]] || return 1
   # Sanitize body: strip all ANSI/OSC/CSI sequences, limit length
   body=$(printf '%s' "$body" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\x1b][^\x07]*\x07//g; s/\x1b[^[][^a-zA-Z]*[a-zA-Z]//g' | head -c 1900)
   local mention_uid=""
   mention_uid=$(_notify_resolve_user_id 2>/dev/null) || true
-  local payload
-  if [[ -n "$mention_uid" ]] && [[ "$mention_uid" =~ ^[0-9]+$ ]]; then
-    payload=$(jq -nc --arg t "$title" --arg d "$body" --arg ts "$(date -Iseconds)" --arg uid "$mention_uid" \
-      '{content:("<@"+$uid+">"),allowed_mentions:{users:[$uid]},embeds:[{title:$t,description:$d,color:16753920,footer:{text:"ccwatch"},timestamp:$ts}]}')
-  else
-    payload=$(jq -nc --arg t "$title" --arg d "$body" --arg ts "$(date -Iseconds)" \
-      '{embeds:[{title:$t,description:$d,color:16753920,footer:{text:"ccwatch"},timestamp:$ts}]}')
+  local fallback_text="$title: $body"
+  if [[ -n "$mention_uid" ]] && [[ "$mention_uid" =~ ^[A-Z0-9]+$ ]]; then
+    fallback_text="<@${mention_uid}> ${fallback_text}"
   fi
+  local payload
+  payload=$(jq -nc --arg t "$title" --arg d "$body" --arg ts "$(date '+%Y-%m-%d %H:%M:%S')" --arg fb "$fallback_text" \
+    '{text:$fb,blocks:[{type:"section",text:{type:"mrkdwn",text:("*"+$t+"*\n\n"+$d)}},{type:"context",elements:[{type:"mrkdwn",text:("ccwatch · "+$ts)}]}]}')
   # [HARDENED] Pass webhook URL via curl config to hide from ps
   local curl_cfg
   curl_cfg=$(mktemp "$CACHE/curl.XXXXXX") || { _log "notify: mktemp failed"; return 1; }
@@ -1019,7 +1017,7 @@ _notify_alert() {
     _log "notify: sent (HTTP $code)"
     date +%s > "$CACHE/notify_last_sent"
   else
-    _log "notify: Discord webhook returned $code"
+    _log "notify: Slack webhook returned $code"
   fi
 }
 
@@ -1028,26 +1026,26 @@ _cmd_notify() {
   case "$sub" in
     on)
       touch "$CACHE/notify_enabled"
-      echo -e "${CG}Discord notifications on${R}"
+      echo -e "${CG}Slack notifications on${R}"
       ;;
     off)
       rm -f "$CACHE/notify_enabled"
-      echo -e "${D}Discord notifications off${R}"
+      echo -e "${D}Slack notifications off${R}"
       ;;
     set)
       if [[ "$(uname)" != "Darwin" ]] || ! command -v security &>/dev/null; then
-        echo "macOS Keychain not available. Use: export CCWATCH_DISCORD_WEBHOOK=https://discord.com/api/webhooks/..."
+        echo "macOS Keychain not available. Use: export CCWATCH_SLACK_WEBHOOK=https://hooks.slack.com/services/..."
         return 1
       fi
-      echo "Create a webhook: Discord server → Settings → Integrations → Webhooks"
-      echo -n "Paste your Discord webhook URL: "
+      echo "Slack → Apps → Incoming Webhooks → Add to Slack → choose channel or your own DM"
+      echo -n "Paste your Slack webhook URL: "
       read -rs url; echo ""
       [[ -z "$url" ]] && { echo "Empty URL. Aborted."; return 1; }
-      if [[ ! "$url" =~ ^https://discord(app)?\.com/api/webhooks/ ]]; then
-        echo -e "${CR}Invalid webhook URL. Must start with https://discord.com/api/webhooks/${R}"
+      if [[ ! "$url" =~ ^https://hooks\.slack\.com/services/ ]]; then
+        echo -e "${CR}Invalid webhook URL. Must start with https://hooks.slack.com/services/${R}"
         return 1
       fi
-      if ! security add-generic-password -s ccwatch -a discord-webhook -w "$url" -U 2>/dev/null; then
+      if ! security add-generic-password -s ccwatch -a slack-webhook -w "$url" -U 2>/dev/null; then
         echo -e "${CR}Failed to store webhook in Keychain.${R}"
         return 1
       fi
@@ -1056,18 +1054,18 @@ _cmd_notify() {
       ;;
     set-user)
       if [[ "$(uname)" != "Darwin" ]] || ! command -v security &>/dev/null; then
-        echo "macOS Keychain not available. Use: export CCWATCH_DISCORD_USER_ID=<your_id>"
+        echo "macOS Keychain not available. Use: export CCWATCH_SLACK_USER_ID=<your_id>"
         return 1
       fi
-      echo "Right-click your name in Discord → Copy User ID (requires Developer Mode)"
-      echo -n "Paste your Discord user ID: "
+      echo "Profile → ⋮ → Copy member ID"
+      echo -n "Paste your Slack member ID: "
       read -r uid; echo ""
       [[ -z "$uid" ]] && { echo "Empty ID. Aborted."; return 1; }
-      if [[ ! "$uid" =~ ^[0-9]+$ ]]; then
-        echo -e "${CR}Invalid user ID. Must be numeric.${R}"
+      if [[ ! "$uid" =~ ^[A-Z0-9]+$ ]]; then
+        echo -e "${CR}Invalid member ID. Must be alphanumeric (e.g. U024BE7LH).${R}"
         return 1
       fi
-      if ! security add-generic-password -s ccwatch -a discord-user-id -w "$uid" -U 2>/dev/null; then
+      if ! security add-generic-password -s ccwatch -a slack-user-id -w "$uid" -U 2>/dev/null; then
         echo -e "${CR}Failed to store user ID in Keychain.${R}"
         return 1
       fi
@@ -1076,20 +1074,20 @@ _cmd_notify() {
       ;;
     test)
       local code
-      code=$(_notify_send "ccwatch test" "Discord notifications are working.") || {
+      code=$(_notify_send "ccwatch test" "Slack notifications are working.") || {
         echo -e "${CR}Failed — no webhook configured.${R}"
         echo "  ccwatch notify set     Store webhook in Keychain"
-        echo "  export CCWATCH_DISCORD_WEBHOOK=https://discord.com/api/webhooks/..."
+        echo "  export CCWATCH_SLACK_WEBHOOK=https://hooks.slack.com/services/..."
         return 1
       }
       if [[ "$code" =~ ^2 ]]; then
         echo -e "${CG}Test notification sent (HTTP $code)${R}"
       else
-        echo -e "${CR}Discord returned HTTP $code${R}"
+        echo -e "${CR}Slack returned HTTP $code${R}"
       fi
       ;;
     delete|rm)
-      if security delete-generic-password -s ccwatch -a discord-webhook &>/dev/null; then
+      if security delete-generic-password -s ccwatch -a slack-webhook &>/dev/null; then
         echo -e "${CG}Webhook removed from Keychain.${R}"
       else
         echo "No webhook found in Keychain."
@@ -1097,18 +1095,18 @@ _cmd_notify() {
       ;;
     *)
       local src="none"
-      if [[ -n "${CCWATCH_DISCORD_WEBHOOK:-}" ]]; then
+      if [[ -n "${CCWATCH_SLACK_WEBHOOK:-}" ]]; then
         src="env"
       elif [[ "$(uname)" == "Darwin" ]] && command -v security &>/dev/null; then
-        security find-generic-password -s ccwatch -a discord-webhook -w &>/dev/null && src="keychain"
+        security find-generic-password -s ccwatch -a slack-webhook -w &>/dev/null && src="keychain"
       fi
       local uid_src="none"
-      if [[ -n "${CCWATCH_DISCORD_USER_ID:-}" ]]; then
+      if [[ -n "${CCWATCH_SLACK_USER_ID:-}" ]]; then
         uid_src="env"
       elif [[ "$(uname)" == "Darwin" ]] && command -v security &>/dev/null; then
         _notify_resolve_user_id &>/dev/null && uid_src="keychain"
       fi
-      echo -e "${B}Discord Notifications${R}"
+      echo -e "${B}Slack Notifications${R}"
       if _notify_enabled; then echo -e "  Status: ${CG}on${R}"
       else echo -e "  Status: ${D}off${R}"; fi
       echo -e "  Webhook: ${B}${src}${R}"
@@ -1117,7 +1115,7 @@ _cmd_notify() {
       echo "  ccwatch notify on       Enable notifications"
       echo "  ccwatch notify off      Disable notifications"
       echo "  ccwatch notify set      Store webhook in macOS Keychain"
-      echo "  ccwatch notify set-user Store Discord user ID for @mention"
+      echo "  ccwatch notify set-user Store Slack member ID for @mention"
       echo "  ccwatch notify test     Send a test notification"
       echo "  ccwatch notify delete   Remove webhook from Keychain"
       ;;
@@ -1346,11 +1344,11 @@ HOOKEOF
     fi
   fi
 
-  # ── Discord notifications (optional) ───────────────────
+  # ── Slack notifications (optional) ───────────────────
   echo ""
-  echo -e "${B}Discord notifications (optional):${R}"
+  echo -e "${B}Slack notifications (optional):${R}"
   echo -e "  ${D}Get notified on your phone when sessions need attention.${R}"
-  echo -e "  ${D}1. Create a webhook: Discord server → Settings → Integrations → Webhooks${R}"
+  echo -e "  ${D}1. Slack → Apps → Incoming Webhooks → Add to Slack → choose channel or DM${R}"
   echo -e "  ${D}2. Run: ccwatch notify set${R}"
   echo -e "  ${D}3. Run: ccwatch notify on${R}"
 
@@ -1372,7 +1370,7 @@ HOOKEOF
   echo ""
   echo -e "  ${D}Voice:   ccwatch voice on${R}"
   echo -e "  ${D}Bell:    ccwatch bell on${R}"
-  echo -e "  ${D}Discord: ccwatch notify set${R}"
+  echo -e "  ${D}Slack:   ccwatch notify set${R}"
   echo -e "  ${D}Logs:    $CACHE/${R}"
 }
 
@@ -1772,8 +1770,8 @@ ccwatch — Ambient Intelligence for Claude Code Sessions
   ccwatch notes --watch    Auto-update every 15 min
   ccwatch voice on|off   Toggle voice narration
   ccwatch bell on|off    Toggle bell sound on attention
-  ccwatch notify on|off  Toggle Discord notifications
-  ccwatch notify set     Configure Discord webhook
+  ccwatch notify on|off  Toggle Slack notifications
+  ccwatch notify set     Configure Slack webhook
   ccwatch notify test    Send a test notification
   ccwatch daemon start   Background scanner (auto-started by setup)
   ccwatch setup          One-time install
@@ -1795,7 +1793,7 @@ Env:
   CCWATCH_MODEL                  Force single model for everything
   CCWATCH_VOICE=true             Enable voice (or: ccwatch voice on)
   CCWATCH_BELL=true              Enable bell sound (or: ccwatch bell on)
-  CCWATCH_DISCORD_WEBHOOK        Discord webhook URL (or: ccwatch notify set)
+  CCWATCH_SLACK_WEBHOOK          Slack webhook URL (or: ccwatch notify set)
   CCWATCH_NOTIFY_COOLDOWN=0      Min seconds between notifications (0=off)
   CCWATCH_SCAN_INTERVAL=30       Daemon scan interval (seconds)
   CCWATCH_OBSIDIAN_VAULT         Obsidian vault path (default: ~/ObsidianVault)

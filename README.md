@@ -83,9 +83,9 @@ ccwatch permissions --apply user     # apply to ~/.claude/settings.json
 ccwatch permissions --apply project  # apply to .claude/settings.json
 ccwatch permissions --reset          # clear logs
 ccwatch voice on|off # toggle voice narration
-ccwatch notify       # Discord notification status
+ccwatch notify       # Slack notification status
 ccwatch notify set   # store webhook in macOS Keychain
-ccwatch notify set-user  # store Discord user ID for @mentions
+ccwatch notify set-user  # store Slack member ID for @mentions
 ccwatch notify on|off    # toggle notifications
 ccwatch notify test  # send a test notification
 ccwatch key          # API key status
@@ -128,13 +128,13 @@ ccwatch voice off   # disable
 When enabled, the daemon speaks alerts when sessions transition to waiting.
 Uses local TTS only (Piper, say, espeak-ng) — no API calls for voice.
 
-## Discord Notifications (Optional)
+## Slack Notifications (Optional)
 
 Get push notifications on your phone when sessions need attention.
 
 ```bash
-ccwatch notify set       # store Discord webhook in macOS Keychain
-ccwatch notify set-user  # store your Discord user ID for @mentions
+ccwatch notify set       # store Slack webhook in macOS Keychain
+ccwatch notify set-user  # store your Slack member ID for @mentions
 ccwatch notify on        # enable
 ccwatch notify test      # verify it works
 ccwatch notify off       # disable
@@ -142,9 +142,9 @@ ccwatch notify delete    # remove webhook from Keychain
 ```
 
 Setup:
-1. Create a webhook: Discord server → Settings → Integrations → Webhooks
+1. Slack → Apps → Incoming Webhooks → Add to Slack → choose your own DM for personal notifications, or a channel for team visibility
 2. `ccwatch notify set` — paste the webhook URL
-3. `ccwatch notify set-user` — paste your Discord user ID (enables mobile push via @mention)
+3. `ccwatch notify set-user` — paste your Slack member ID (Profile → ⋮ → Copy member ID; enables mobile push via @mention)
 4. `ccwatch notify on`
 
 The daemon sends a notification when the waiting session count increases. No polling, no API cost.
@@ -159,7 +159,7 @@ tmux status bar  <--  cc:4 ?1 !2 ==---    (daemon writes tmux vars)
             |  - regex pane scanning     |   <- $0, every 30s
             |  - hook event overrides    |
             |  - permission logging      |
-            |  - bell/voice/discord on   |
+            |  - bell/voice/slack on     |
             |    waiting sessions        |
             |  - NO api calls            |
             +-------------+-------------+
@@ -181,9 +181,9 @@ tmux status bar  <--  cc:4 ?1 !2 ==---    (daemon writes tmux vars)
 | `CCWATCH_MODEL_THINK` | `claude-sonnet-4-5-20250929` | Think tier (ls, status, permissions) |
 | `CCWATCH_MODEL` | (none) | Override: force one model for everything |
 | `CCWATCH_VOICE` | `false` | Enable voice alerts |
-| `CCWATCH_DISCORD_WEBHOOK` | (none) | Discord webhook URL (or: `ccwatch notify set`) |
-| `CCWATCH_DISCORD_USER_ID` | (none) | Discord user ID for @mentions (or: `ccwatch notify set-user`) |
-| `CCWATCH_NOTIFY_COOLDOWN` | `0` | Minimum seconds between Discord notifications |
+| `CCWATCH_SLACK_WEBHOOK` | (none) | Slack webhook URL (or: `ccwatch notify set`) |
+| `CCWATCH_SLACK_USER_ID` | (none) | Slack member ID for @mentions (or: `ccwatch notify set-user`) |
+| `CCWATCH_NOTIFY_COOLDOWN` | `0` | Minimum seconds between Slack notifications |
 | `CCWATCH_SCAN_INTERVAL` | `30` | Daemon scan interval (seconds) |
 | `CCWATCH_LINES` | `80` | Terminal lines captured per pane |
 
