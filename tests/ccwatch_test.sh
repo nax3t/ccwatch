@@ -99,7 +99,8 @@ _extract_fn() {
 for fn in _validate_model _validate_pane_id _check_api _check_deps \
           _detect _sbadge _cbar _read_state _statusbar _rotate_if_large \
           _voice_enabled _voice_alert _voice_summary _log _log_permission _resolve_api_key \
-          _notify_enabled _notify_resolve_webhook _notify_send _notify_cooldown_ok _notify_alert; do
+          _notify_enabled _notify_resolve_webhook _notify_resolve_user_id _notify_send _notify_cooldown_ok _notify_alert \
+          _bell_enabled; do
   eval "$(_extract_fn "$fn")"
 done
 
@@ -527,10 +528,32 @@ CCWATCH_SLACK_WEBHOOK="https://hooks.slack.com/services/T00/B00/xxxx"
 out=$(_notify_resolve_webhook)
 _assert_eq "env var: returns webhook" "https://hooks.slack.com/services/T00/B00/xxxx" "$out"
 
-# Env var unset → returns 1 (unless Keychain has it, but we can't mock security easily)
-unset CCWATCH_SLACK_WEBHOOK
-_notify_resolve_webhook &>/dev/null
-_assert_eq "no env var: fails" "1" "$?"
+# Env var unset + no Keychain → returns 1
+_notify_resolve_webhook_no_keychain() {
+  unset CCWATCH_SLACK_WEBHOOK
+  security() { return 1; }
+  export -f security
+  _notify_resolve_webhook
+  local rc=$?
+  unset -f security
+  return $rc
+}
+_notify_resolve_webhook_no_keychain &>/dev/null
+_assert_eq "no env var, no keychain: fails" "1" "$?"
+
+# Env var unset + Keychain has it → returns it
+_notify_resolve_webhook_from_keychain() {
+  unset CCWATCH_SLACK_WEBHOOK
+  uname() { echo "Darwin"; }
+  security() { echo "https://hooks.slack.com/services/T00/B00/fromkc"; }
+  export -f uname security
+  _notify_resolve_webhook
+  local rc=$?
+  unset -f uname security
+  return $rc
+}
+out=$(_notify_resolve_webhook_from_keychain)
+_assert_eq "keychain fallback: returns webhook" "https://hooks.slack.com/services/T00/B00/fromkc" "$out"
 
 # Restore
 unset CCWATCH_SLACK_WEBHOOK
@@ -555,6 +578,155 @@ _assert_eq "rejects wrong path" "1" "$?"
 
 # Restore
 unset CCWATCH_SLACK_WEBHOOK
+
+# ─── 16b. Notify user ID resolution: _notify_resolve_user_id ─────────────────
+echo ""
+echo "=== _notify_resolve_user_id ==="
+
+# Env var set → returns it
+CCWATCH_SLACK_USER_ID="U024BE7LH"
+out=$(_notify_resolve_user_id)
+_assert_eq "env var: returns user ID" "U024BE7LH" "$out"
+
+# Env var unset + no Keychain → returns 1
+_resolve_uid_no_keychain() {
+  unset CCWATCH_SLACK_USER_ID
+  security() { return 1; }
+  export -f security
+  _notify_resolve_user_id
+  local rc=$?
+  unset -f security
+  return $rc
+}
+_resolve_uid_no_keychain &>/dev/null
+_assert_eq "no env var, no keychain: fails" "1" "$?"
+
+# Env var unset + Keychain has it → returns it
+_resolve_uid_from_keychain() {
+  unset CCWATCH_SLACK_USER_ID
+  uname() { echo "Darwin"; }
+  security() { echo "U999FROMKC"; }
+  export -f uname security
+  _notify_resolve_user_id
+  local rc=$?
+  unset -f uname security
+  return $rc
+}
+out=$(_resolve_uid_from_keychain)
+_assert_eq "keychain fallback: returns user ID" "U999FROMKC" "$out"
+
+# Restore
+unset CCWATCH_SLACK_USER_ID
+
+# ─── 16c. Notify send: payload and user ID handling ─────────────────────────
+echo ""
+echo "=== _notify_send payload ==="
+
+# Valid webhook + no user ID → payload has blocks and text
+CCWATCH_SLACK_WEBHOOK="https://hooks.slack.com/services/T00/B00/xxxx"
+unset CCWATCH_SLACK_USER_ID
+# Mock curl to capture payload instead of sending
+_notify_send_capture() {
+  # Override curl to dump the -d argument
+  curl() {
+    local arg
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        -d) echo "$2"; return 0 ;;
+        *) shift ;;
+      esac
+    done
+  }
+  export -f curl
+  _notify_send "$@"
+  unset -f curl
+}
+# Suppress the HTTP code output, capture via a temp file
+payload_file="$TEST_CACHE/payload.json"
+_notify_send_capture_to_file() {
+  curl() {
+    local arg
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        -d) echo "$2" > "$payload_file"; printf "200"; return 0 ;;
+        *) shift ;;
+      esac
+    done
+  }
+  export -f curl
+  _notify_send "$1" "$2" >/dev/null
+  unset -f curl
+}
+_notify_send_capture_to_file "Test Title" "Test body here"
+_assert_eq "payload: valid JSON" "0" "$(jq -e '.' "$payload_file" &>/dev/null; echo $?)"
+_assert_eq "payload: has text field" "0" "$(jq -e '.text' "$payload_file" &>/dev/null; echo $?)"
+_assert_eq "payload: has blocks array" "0" "$(jq -e '.blocks | length > 0' "$payload_file" &>/dev/null; echo $?)"
+_assert_eq "payload: section block type" "section" "$(jq -r '.blocks[0].type' "$payload_file")"
+_assert_eq "payload: context block type" "context" "$(jq -r '.blocks[1].type' "$payload_file")"
+_assert_match "payload: title in mrkdwn" "Test Title" "$(jq -r '.blocks[0].text.text' "$payload_file")"
+# With user ID → mention in text field
+CCWATCH_SLACK_USER_ID="U024BE7LH"
+_notify_send_capture_to_file "Alert" "Something happened"
+_assert_match "payload: mention with user ID" '<@U024BE7LH>' "$(jq -r '.text' "$payload_file")"
+
+# Lowercase user ID → uppercased
+CCWATCH_SLACK_USER_ID="u024be7lh"
+_notify_send_capture_to_file "Alert" "Something happened"
+_assert_match "payload: lowercase ID uppercased" '<@U024BE7LH>' "$(jq -r '.text' "$payload_file")"
+
+# No user ID (mock security to prevent Keychain leak) → no mention
+unset CCWATCH_SLACK_USER_ID
+_notify_send_no_uid() {
+  security() { return 1; }
+  export -f security
+  curl() {
+    local arg
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        -d) echo "$2" > "$payload_file"; printf "200"; return 0 ;;
+        *) shift ;;
+      esac
+    done
+  }
+  export -f curl
+  _notify_send "$1" "$2" >/dev/null
+  unset -f curl security
+}
+_notify_send_no_uid "Test Title" "Test body here"
+_assert_match "payload: no mention without user ID" '^Test Title' "$(jq -r '.text' "$payload_file")"
+
+# Restore
+unset CCWATCH_SLACK_WEBHOOK CCWATCH_SLACK_USER_ID
+rm -f "$payload_file"
+
+# ─── 16d. Bell toggle: _bell_enabled ────────────────────────────────────────
+echo ""
+echo "=== _bell_enabled ==="
+
+# Neither env var nor file → disabled
+unset CCWATCH_BELL
+rm -f "$CACHE/bell_enabled"
+_bell_enabled 2>/dev/null
+_assert_eq "disabled by default" "1" "$?"
+
+# Env var → enabled
+CCWATCH_BELL="true"
+_bell_enabled 2>/dev/null
+_assert_eq "enabled via env var" "0" "$?"
+
+# File toggle → enabled (even without env var)
+unset CCWATCH_BELL
+touch "$CACHE/bell_enabled"
+_bell_enabled 2>/dev/null
+_assert_eq "enabled via file toggle" "0" "$?"
+
+# File removed → disabled again
+rm -f "$CACHE/bell_enabled"
+_bell_enabled 2>/dev/null
+_assert_eq "disabled after file removed" "1" "$?"
+
+# Restore
+CCWATCH_BELL="false"
 
 # ─── 17. prev sanitization ────────────────────────────────────────────────────
 echo ""

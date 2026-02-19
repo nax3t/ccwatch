@@ -329,7 +329,7 @@ _daemon_scan() {
     # Grab last few non-empty lines for notification context
     local tail_lines=""
     if [[ "$st" == "permission" || "$st" == "question" || "$st" == "error" ]]; then
-      tail_lines=$(printf '%s' "$content" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | grep -v '^[[:space:]]*$' | tail -4 | head -c 300)
+      tail_lines=$(printf '%s' "$content" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\x1b][^\x07]*\x07//g' | grep -v '^[[:space:]_─━═╭╮╰╯│┃▰▱░▒▓·•―—\-]*$' | tail -4 | head -c 300)
     fi
     case "$st" in
       permission) p=$((p+1)); w=$((w+1))
