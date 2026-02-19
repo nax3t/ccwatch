@@ -314,7 +314,7 @@ _detect() {
 
 # ─── DAEMON ───────────────────────────────────────────────────────────────────
 _daemon_scan() {
-  local n=0 w=0 q=0 p=0 e=0 notify_body="" notify_raw=""
+  local n=0 w=0 q=0 p=0 e=0 notify_lines=""
   local scan_tmp
   scan_tmp=$(mktemp "$CACHE/scan.XXXXXX") || { _log "mktemp failed in _daemon_scan"; return; }
 
@@ -347,10 +347,8 @@ _daemon_scan() {
         st="question"; sd="session stopped — may need input"
       fi
     fi
-    # Accumulate raw content for AI summarization
-    local pane_content="" pane_cwd="" pane_branch="" pane_project=""
+    local pane_cwd="" pane_branch="" pane_project=""
     if [[ "$st" == "permission" || "$st" == "question" || "$st" == "error" ]]; then
-      pane_content=$(printf '%s' "$content" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\x1b][^\x07]*\x07//g' | grep -v '^[[:space:]_─━═╭╮╰╯│┃▰▱░▒▓·•―—\-]*$' | tail -8 | head -c 500)
       pane_cwd=$(tmux display-message -t "$pid" -p '#{pane_current_path}' 2>/dev/null) || true
       pane_branch=$(git -C "$pane_cwd" rev-parse --abbrev-ref HEAD 2>/dev/null) || true
       pane_project=$(basename "$pane_cwd" 2>/dev/null) || true
@@ -361,14 +359,11 @@ _daemon_scan() {
     case "$st" in
       permission) p=$((p+1)); w=$((w+1))
         _log_permission "$pid" "$label" "$sd"
-        notify_body+="${pane_header} — permission"$'\n'"${pane_content}"$'\n\n'
-        notify_raw+="[${pane_header} — permission]"$'\n'"${pane_content}"$'\n\n' ;;
+        notify_lines+="${pane_header} — permission"$'\n' ;;
       question) q=$((q+1)); w=$((w+1))
-        notify_body+="${pane_header} — question"$'\n'"${pane_content}"$'\n\n'
-        notify_raw+="[${pane_header} — question]"$'\n'"${pane_content}"$'\n\n' ;;
+        notify_lines+="${pane_header} — question"$'\n' ;;
       error) e=$((e+1)); w=$((w+1))
-        notify_body+="${pane_header} — error"$'\n'"${pane_content}"$'\n\n'
-        notify_raw+="[${pane_header} — error]"$'\n'"${pane_content}"$'\n\n' ;;
+        notify_lines+="${pane_header} — error"$'\n' ;;
     esac
     jq -nc --arg P "$pid" --arg l "$label" --arg s "$st" --arg d "$sd" \
       '{pane:$P,label:$l,state:$s,detail:$d}' >> "$scan_tmp"
@@ -419,19 +414,12 @@ _daemon_scan() {
   if [[ "$w" -gt "${prev:-0}" ]] && [[ "$w" -gt 0 ]]; then
     echo -ne '\a'
     _bell_alert
-    # Try AI summarization for cleaner, safer notifications
-    local summary_body="$notify_body"
-    if _notify_enabled 2>/dev/null && [[ -n "$notify_raw" ]]; then
-      local ai_summary
-      ai_summary=$(_notify_summarize "$notify_raw" 2>/dev/null) || true
-      [[ -n "$ai_summary" ]] && summary_body="$ai_summary"
-    fi
     if [[ "$w" -eq 1 ]]; then
       _voice_alert "One session needs attention."
-      _notify_alert "1 session needs attention" "$summary_body"
+      _notify_alert "1 session needs attention" "$notify_lines"
     else
       _voice_alert "$w sessions need attention."
-      _notify_alert "$w sessions need attention" "$summary_body"
+      _notify_alert "$w sessions need attention" "$notify_lines"
     fi
   fi
   tmux set-option -g @ccw_prev_w "$w" 2>/dev/null || true
