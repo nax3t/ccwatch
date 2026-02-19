@@ -326,14 +326,19 @@ _daemon_scan() {
         st="question"; sd="session stopped — may need input"
       fi
     fi
+    # Grab last few non-empty lines for notification context
+    local tail_lines=""
+    if [[ "$st" == "permission" || "$st" == "question" || "$st" == "error" ]]; then
+      tail_lines=$(printf '%s' "$content" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | grep -v '^[[:space:]]*$' | tail -4 | head -c 300)
+    fi
     case "$st" in
       permission) p=$((p+1)); w=$((w+1))
         _log_permission "$pid" "$label" "$sd"
-        notify_body+="${label} — permission: ${sd}"$'\n' ;;
+        notify_body+="${label} — permission"$'\n'"${tail_lines}"$'\n\n' ;;
       question) q=$((q+1)); w=$((w+1))
-        notify_body+="${label} — question: ${sd}"$'\n' ;;
+        notify_body+="${label} — question"$'\n'"${tail_lines}"$'\n\n' ;;
       error) e=$((e+1)); w=$((w+1))
-        notify_body+="${label} — error"$'\n' ;;
+        notify_body+="${label} — error"$'\n'"${tail_lines}"$'\n\n' ;;
     esac
     jq -nc --arg P "$pid" --arg l "$label" --arg s "$st" --arg d "$sd" \
       '{pane:$P,label:$l,state:$s,detail:$d}' >> "$scan_tmp"
