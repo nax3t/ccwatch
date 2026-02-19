@@ -329,11 +329,11 @@ _daemon_scan() {
     case "$st" in
       permission) p=$((p+1)); w=$((w+1))
         _log_permission "$pid" "$label" "$sd"
-        notify_body+="**${label}** — permission: ${sd}\n" ;;
+        notify_body+="${label} — permission: ${sd}"$'\n' ;;
       question) q=$((q+1)); w=$((w+1))
-        notify_body+="**${label}** — question: ${sd}\n" ;;
+        notify_body+="${label} — question: ${sd}"$'\n' ;;
       error) e=$((e+1)); w=$((w+1))
-        notify_body+="**${label}** — error\n" ;;
+        notify_body+="${label} — error"$'\n' ;;
     esac
     jq -nc --arg P "$pid" --arg l "$label" --arg s "$st" --arg d "$sd" \
       '{pane:$P,label:$l,state:$s,detail:$d}' >> "$scan_tmp"
@@ -386,10 +386,10 @@ _daemon_scan() {
     _bell_alert
     if [[ "$w" -eq 1 ]]; then
       _voice_alert "One session needs attention."
-      _notify_alert "1 session needs attention" "${notify_body//\\n/$'\n'}"
+      _notify_alert "1 session needs attention" "$notify_body"
     else
       _voice_alert "$w sessions need attention."
-      _notify_alert "$w sessions need attention" "${notify_body//\\n/$'\n'}"
+      _notify_alert "$w sessions need attention" "$notify_body"
     fi
   fi
   tmux set-option -g @ccw_prev_w "$w" 2>/dev/null || true
@@ -977,6 +977,7 @@ _notify_send() {
   local mention_uid=""
   mention_uid=$(_notify_resolve_user_id 2>/dev/null) || true
   local fallback_text="$title: $body"
+  mention_uid="${mention_uid^^}"
   if [[ -n "$mention_uid" ]] && [[ "$mention_uid" =~ ^[A-Z0-9]+$ ]]; then
     fallback_text="<@${mention_uid}> ${fallback_text}"
   fi
@@ -1087,11 +1088,14 @@ _cmd_notify() {
       fi
       ;;
     delete|rm)
+      local deleted=0
       if security delete-generic-password -s ccwatch -a slack-webhook &>/dev/null; then
-        echo -e "${CG}Webhook removed from Keychain.${R}"
-      else
-        echo "No webhook found in Keychain."
+        echo -e "${CG}Webhook removed from Keychain.${R}"; deleted=1
       fi
+      if security delete-generic-password -s ccwatch -a slack-user-id &>/dev/null; then
+        echo -e "${CG}User ID removed from Keychain.${R}"; deleted=1
+      fi
+      [[ "$deleted" -eq 0 ]] && echo "No webhook or user ID found in Keychain."
       ;;
     *)
       local src="none"
