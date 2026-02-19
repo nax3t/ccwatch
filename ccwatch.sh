@@ -247,8 +247,24 @@ _cap() {
   tmux capture-pane -t "$1" -p -S "-${CAP}" 2>/dev/null || echo "[gone]"
 }
 
+_pane_position() {
+  # Compute spatial label (top-left, bottom-right, etc.) from tmux coordinates
+  local top="$1" left="$2" win_h="$3" win_w="$4"
+  local vpos hpos
+  if [[ "$top" -eq 0 ]]; then vpos="top"; else vpos="bottom"; fi
+  if [[ "$win_w" -gt 0 ]]; then
+    local third=$((win_w / 3))
+    if [[ "$left" -lt "$third" ]]; then hpos="left"
+    elif [[ "$left" -lt $((third * 2)) ]]; then hpos="center"
+    else hpos="right"; fi
+  else
+    hpos="left"
+  fi
+  echo "${vpos}-${hpos}"
+}
+
 _discover() {
-  while IFS='|' read -r pid sn wi pi pp pt; do
+  while IFS='|' read -r pid sn wi pi pp pt ptop pleft wh ww; do
     [[ -z "$pid" ]] && continue
     # Validate pane ID format from tmux output
     [[ "$pid" =~ ^%[0-9]+$ ]] || continue
@@ -256,10 +272,15 @@ _discover() {
     local label="${sn}:${wi}.${pi}"
     [[ "$label" =~ ^[a-zA-Z0-9:._-]+$ ]] || continue
     if _is_cc "$pid"; then
-      echo "${pid}|${label}"
+      local pos=""
+      if [[ "$ptop" =~ ^[0-9]+$ ]] && [[ "$pleft" =~ ^[0-9]+$ ]] && \
+         [[ "$wh" =~ ^[0-9]+$ ]] && [[ "$ww" =~ ^[0-9]+$ ]]; then
+        pos=$(_pane_position "$ptop" "$pleft" "$wh" "$ww")
+      fi
+      echo "${pid}|${label}|${pos}"
     fi
   done < <(tmux list-panes -a -F \
-    '#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{pane_pid}|#{pane_title}' 2>/dev/null)
+    '#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{pane_pid}|#{pane_title}|#{pane_top}|#{pane_left}|#{window_height}|#{window_width}' 2>/dev/null)
 }
 
 # ─── Pattern-based state detection (no AI) ────────────────────────────────────
@@ -312,7 +333,7 @@ _daemon_scan() {
     done
   fi
 
-  while IFS='|' read -r pid label; do
+  while IFS='|' read -r pid label pane_pos; do
     [[ -z "$pid" ]] && continue; n=$((n+1))
     local content; content=$(tmux capture-pane -t "$pid" -p -S -30 2>/dev/null) || { _log "pane $pid gone"; continue; }
     local si st sd; si=$(_detect "$content"); st=${si%%|*}; sd=${si#*|}
@@ -327,21 +348,27 @@ _daemon_scan() {
       fi
     fi
     # Accumulate raw content for AI summarization
-    local pane_content=""
+    local pane_content="" pane_cwd="" pane_branch="" pane_project=""
     if [[ "$st" == "permission" || "$st" == "question" || "$st" == "error" ]]; then
       pane_content=$(printf '%s' "$content" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g; s/\x1b][^\x07]*\x07//g' | grep -v '^[[:space:]_─━═╭╮╰╯│┃▰▱░▒▓·•―—\-]*$' | tail -8 | head -c 500)
+      pane_cwd=$(tmux display-message -t "$pid" -p '#{pane_current_path}' 2>/dev/null) || true
+      pane_branch=$(git -C "$pane_cwd" rev-parse --abbrev-ref HEAD 2>/dev/null) || true
+      pane_project=$(basename "$pane_cwd" 2>/dev/null) || true
     fi
+    local pane_header="${pane_pos:-${label}}"
+    [[ -n "$pane_project" ]] && pane_header+=" ${pane_project}"
+    [[ -n "$pane_branch" ]] && pane_header+=" @ ${pane_branch}"
     case "$st" in
       permission) p=$((p+1)); w=$((w+1))
         _log_permission "$pid" "$label" "$sd"
-        notify_body+="${label} — permission"$'\n'"${pane_content}"$'\n\n'
-        notify_raw+="[${label}]"$'\n'"${pane_content}"$'\n\n' ;;
+        notify_body+="${pane_header} — permission"$'\n'"${pane_content}"$'\n\n'
+        notify_raw+="[${pane_header} — permission]"$'\n'"${pane_content}"$'\n\n' ;;
       question) q=$((q+1)); w=$((w+1))
-        notify_body+="${label} — question"$'\n'"${pane_content}"$'\n\n'
-        notify_raw+="[${label}]"$'\n'"${pane_content}"$'\n\n' ;;
+        notify_body+="${pane_header} — question"$'\n'"${pane_content}"$'\n\n'
+        notify_raw+="[${pane_header} — question]"$'\n'"${pane_content}"$'\n\n' ;;
       error) e=$((e+1)); w=$((w+1))
-        notify_body+="${label} — error"$'\n'"${pane_content}"$'\n\n'
-        notify_raw+="[${label}]"$'\n'"${pane_content}"$'\n\n' ;;
+        notify_body+="${pane_header} — error"$'\n'"${pane_content}"$'\n\n'
+        notify_raw+="[${pane_header} — error]"$'\n'"${pane_content}"$'\n\n' ;;
     esac
     jq -nc --arg P "$pid" --arg l "$label" --arg s "$st" --arg d "$sd" \
       '{pane:$P,label:$l,state:$s,detail:$d}' >> "$scan_tmp"
@@ -564,8 +591,8 @@ _cmd_default() {
 
 _ls_analyze() {
   local h; h=$(_hist 20)
-  while IFS='|' read -r pid lbl; do [[ -z "$pid" ]] && continue
-    _LS_S+=("$pid|$lbl")
+  while IFS='|' read -r pid lbl pos; do [[ -z "$pid" ]] && continue
+    _LS_S+=("$pid|$lbl|${pos:-}")
     _event "$pid" "scan" ""
   done < <(_discover)
   [[ ${#_LS_S[@]} -eq 0 ]] && { echo -e "${D}No Claude Code sessions.${R}"; return 1; }
@@ -573,7 +600,7 @@ _ls_analyze() {
   echo -e "${D}Analyzing ${#_LS_S[@]} session(s)...${R}"
   local _adir; _adir=$(mktemp -d "$CACHE/par.XXXXXX") || { echo "ERROR: mktemp failed"; return 1; }
   for i in "${!_LS_S[@]}"; do
-    local pid lbl; IFS='|' read -r pid lbl <<< "${_LS_S[$i]}"
+    local pid lbl _pos; IFS='|' read -r pid lbl _pos <<< "${_LS_S[$i]}"
     ( _analyze "$(_cap "$pid")" "$lbl" "$h" > "$_adir/$i" ) &
   done
   wait
@@ -592,7 +619,7 @@ _ls_analyze() {
 _ls_render_session() {
   # Mutates caller vars: _ls_lo[], _ls_pn, _ls_vw, _ls_vwt, _ls_vi, _ls_ve, _ls_vd, _ls_focus_*
   local idx="$1" first="$2"
-  local pid lbl; IFS='|' read -r pid lbl <<< "${_LS_S[$idx]}"
+  local pid lbl pos; IFS='|' read -r pid lbl pos <<< "${_LS_S[$idx]}"
   local a="${_LS_A[$idx]}"
   local st ts na br cs cl ss sa
   local _sf
@@ -609,7 +636,8 @@ _ls_render_session() {
   [[ "$first" -ne 1 ]] && echo -e "  ${D}──────────────────────────────────────────────────────────────${R}"
 
   local sw; if [[ "$ss" == "true" ]]; then sw="${CG}↔${R}"; else sw="${CY}⚠${R}"; fi
-  echo -e "  $(_sbadge "$st") ${B}${lbl}${R}  ${D}[$(_e "$br")]${R}  $(_cbar "$cs" "$cl")  $sw"
+  local pos_tag=""; [[ -n "$pos" ]] && pos_tag=" ${D}${pos}${R}"
+  echo -e "  $(_sbadge "$st") ${B}${lbl}${R}${pos_tag}  ${D}[$(_e "$br")]${R}  $(_cbar "$cs" "$cl")  $sw"
   echo -e "  ${D}│${R} $(_e "$ts")"
   echo -e "  ${D}│${R} ${D}↳ $(_e "$na")${R}"
   [[ -n "$sa" ]] && echo -e "  ${D}│${R} ${CC}→ $(_e "$sa")${R}"
@@ -1030,14 +1058,25 @@ _notify_summarize() {
   local raw_content="$1"
   # Require API key; fall back to empty (caller uses label-only fallback)
   [[ -n "${ANTHROPIC_API_KEY:-}" ]] || return 1
-  local sys="You summarize terminal output from Claude Code sessions for a Slack push notification. Rules:
-- Produce 1-2 sentences per session describing what it needs from the user
-- Redact anything sensitive: API keys, tokens, passwords, webhook URLs, credentials, env var values, secret file paths
-- Keep it glanceable — this is a phone push notification
-- No markdown formatting, no code blocks
-- If you can't tell what's needed, say 'needs attention'"
+  local sys='You summarize Claude Code terminal output for a Slack push notification.
+
+Each input section is labeled [position project @ branch — type]. Position is a spatial label like "top-left" or "bottom-right" describing where the pane sits in the tmux grid.
+
+Output one line per session in this exact format:
+POSITION project @ branch: summary
+
+Example output:
+top-left web @ main: Wants permission to run npm test
+bottom-right api @ feature-x: Asking which database migration strategy to use
+
+Rules:
+- One line per session, max ~15 words for the summary part
+- The summary should say what the session needs from the user
+- Redact anything sensitive: API keys, tokens, passwords, webhook URLs, credentials, env var values
+- No markdown, no code blocks, no bullet points
+- If you cannot tell what is needed, say "needs attention"'
   local result
-  result=$(_call "fast" "$sys" "$raw_content" 150 2>/dev/null) || return 1
+  result=$(_call "fast" "$sys" "$raw_content" 200 2>/dev/null) || return 1
   [[ -n "$result" ]] || return 1
   printf '%s' "$result"
 }

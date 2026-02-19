@@ -100,7 +100,7 @@ for fn in _validate_model _validate_pane_id _check_api _check_deps \
           _detect _sbadge _cbar _read_state _statusbar _rotate_if_large \
           _voice_enabled _voice_alert _voice_summary _log _log_permission _resolve_api_key \
           _notify_enabled _notify_resolve_webhook _notify_resolve_user_id _notify_send _notify_cooldown_ok _notify_summarize _notify_alert \
-          _bell_enabled; do
+          _bell_enabled _pane_position; do
   eval "$(_extract_fn "$fn")"
 done
 
@@ -728,7 +728,28 @@ _assert_eq "disabled after file removed" "1" "$?"
 # Restore
 CCWATCH_BELL="false"
 
-# ─── 16e. Obsidian filter: rejects script/iframe/javascript/embed ────────────
+# ─── 16e. Pane position: _pane_position ──────────────────────────────────────
+echo ""
+echo "=== _pane_position ==="
+
+# 2x2 grid (window 100x50)
+_assert_eq "2x2: top-left" "top-left" "$(_pane_position 0 0 50 100)"
+_assert_eq "2x2: top-right" "top-right" "$(_pane_position 0 70 50 100)"
+_assert_eq "2x2: bottom-left" "bottom-left" "$(_pane_position 26 0 50 100)"
+_assert_eq "2x2: bottom-right" "bottom-right" "$(_pane_position 26 70 50 100)"
+
+# 3x2 grid (window 239x55, matching real layout)
+_assert_eq "3x2: top-left" "top-left" "$(_pane_position 0 0 55 239)"
+_assert_eq "3x2: top-center" "top-center" "$(_pane_position 0 95 55 239)"
+_assert_eq "3x2: top-right" "top-right" "$(_pane_position 0 168 55 239)"
+_assert_eq "3x2: bottom-left" "bottom-left" "$(_pane_position 23 0 55 239)"
+_assert_eq "3x2: bottom-center" "bottom-center" "$(_pane_position 23 95 55 239)"
+_assert_eq "3x2: bottom-right" "bottom-right" "$(_pane_position 23 180 55 239)"
+
+# Single pane (full screen)
+_assert_eq "single: top-left" "top-left" "$(_pane_position 0 0 50 100)"
+
+# ─── 16f. Obsidian filter: rejects script/iframe/javascript/embed ────────────
 echo ""
 echo "=== Obsidian filter ==="
 
