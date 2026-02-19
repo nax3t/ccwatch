@@ -44,7 +44,7 @@ MAX_LOG_SIZE=5242880  # 5MB
 
 # ─── Models (two-tier: fast + think) ─────────────────────────────────────────
 M_FAST="${CCWATCH_MODEL_FAST:-claude-haiku-4-5-20251001}"
-M_THINK="${CCWATCH_MODEL_THINK:-claude-sonnet-4-5-20250929}"
+M_THINK="${CCWATCH_MODEL_THINK:-claude-sonnet-4-6-20250527}"
 M_OVERRIDE="${CCWATCH_MODEL:-}"
 
 # [HARDENED #12] Validate model names — alphanumeric, hyphens, dots only

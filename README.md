@@ -195,7 +195,7 @@ All config is optional. Defaults work out of the box.
 |---|---|---|
 | `ANTHROPIC_API_KEY` | (required) | API key — or use `ccwatch key set` for Keychain |
 | `CCWATCH_MODEL_FAST` | `claude-haiku-4-5-20251001` | Model for fast tier |
-| `CCWATCH_MODEL_THINK` | `claude-sonnet-4-5-20250929` | Model for analysis (ls, status, permissions) |
+| `CCWATCH_MODEL_THINK` | `claude-sonnet-4-6-20250527` | Model for analysis (ls, status, permissions) |
 | `CCWATCH_MODEL` | (none) | Override: force one model for everything |
 | `CCWATCH_VOICE` | `false` | Enable voice alerts — or use `ccwatch voice on` |
 | `CCWATCH_BELL` | `false` | Enable bell sound — or use `ccwatch bell on` |
