@@ -98,7 +98,7 @@ ccwatch voice on|off             # toggle voice narration (local TTS)
 ccwatch bell on|off              # toggle bell sound on attention
 ccwatch notes                    # generate Obsidian daily note from session activity
 ccwatch key set                  # store API key in macOS Keychain
-ccwatch daemon start|stop|status # manage background daemon
+ccwatch daemon start|stop|restart|status  # manage background daemon
 ccwatch setup                    # run interactive setup
 ```
 

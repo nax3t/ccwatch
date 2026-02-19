@@ -1738,7 +1738,7 @@ case "${1:-}" in
   permissions|perm) shift; case "${1:-}" in
     --apply) _cmd_perms_apply "${2:-user}" ;; --reset) _cmd_perms_reset ;; *) _cmd_perms ;; esac ;;
   daemon|d) shift; case "${1:-status}" in
-    start) _daemon_start ;; stop) _daemon_stop ;; *) _daemon_status ;; esac ;;
+    start) _daemon_start ;; stop) _daemon_stop ;; restart) _daemon_stop; sleep 1; _daemon_start ;; *) _daemon_status ;; esac ;;
   --statusbar) _statusbar ;;
   --popup) shift
     # Wrapper for tmux display-popup: pipe output through less for scrolling.
@@ -1782,7 +1782,7 @@ ccwatch — Ambient Intelligence for Claude Code Sessions
   ccwatch notify on|off  Toggle Slack notifications
   ccwatch notify set     Configure Slack webhook
   ccwatch notify test    Send a test notification
-  ccwatch daemon start   Background scanner (auto-started by setup)
+  ccwatch daemon start|stop|restart|status   Manage background scanner
   ccwatch setup          One-time install
 
 Status bar (always visible, $0):
