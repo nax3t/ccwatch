@@ -1315,13 +1315,6 @@ bind-key A display-popup -E "bash '${me_escaped}' --popup ls"
 bind-key P display-popup -E "bash '${me_escaped}' --popup permissions"
 bind-key N display-popup -E "bash '${me_escaped}' --popup notes"
 
-# Session persistence (panes + directories survive reboots)
-set -g @plugin 'tmux-plugins/tpm'
-set -g @plugin 'tmux-plugins/tmux-resurrect'
-set -g @plugin 'tmux-plugins/tmux-continuum'
-set -g @continuum-restore 'on'
-set -g @continuum-save-interval '15'
-run '~/.tmux/plugins/tpm/tpm'
 # ── /ccwatch ──────────────────────────────────────────
 TMUX
 )
@@ -1332,7 +1325,7 @@ TMUX
     echo -e "${CG}✓ tmux.conf already has ccwatch config${R}"
   else
     echo -e "${B}Add to ~/.tmux.conf?${R}"
-    echo -e "${D}This adds: status bar, daemon auto-start, keybindings, session persistence${R}"
+    echo -e "${D}This adds: status bar, daemon auto-start, keybindings${R}"
     echo ""
     echo -e "${CY}Append to ${tmux_conf}? [Y/n]${R}"
     read -rsn1 yn; echo ""
@@ -1340,7 +1333,15 @@ TMUX
       echo "$conf_block" >> "$tmux_conf"
       echo -e "${CG}✓ Appended to ${tmux_conf}${R}"
       echo -e "${D}  Reload: tmux source ~/.tmux.conf${R}"
-      echo -e "${D}  Then:   prefix + I  to install TPM plugins${R}"
+      # Suggest continuum plugin if not already declared
+      if ! grep -q 'tmux-continuum' "$tmux_conf"; then
+        echo ""
+        echo -e "${CY}Recommended:${R} Add session persistence to your plugin section (or ~/.tmux.local):"
+        echo -e "${D}  set -g @plugin 'tmux-plugins/tmux-continuum'${R}"
+        echo -e "${D}  set -g @continuum-restore 'on'${R}"
+        echo -e "${D}  set -g @continuum-save-interval '15'${R}"
+        echo -e "${D}  Then: prefix + I  to install TPM plugins${R}"
+      fi
     else
       echo -e "${D}Manual setup — add this to ${tmux_conf}:${R}"
       echo "$conf_block"
