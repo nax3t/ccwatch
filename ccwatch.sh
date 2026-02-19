@@ -44,7 +44,7 @@ MAX_LOG_SIZE=5242880  # 5MB
 
 # ─── Models (two-tier: fast + think) ─────────────────────────────────────────
 M_FAST="${CCWATCH_MODEL_FAST:-claude-haiku-4-5-20251001}"
-M_THINK="${CCWATCH_MODEL_THINK:-claude-sonnet-4-6-20250527}"
+M_THINK="${CCWATCH_MODEL_THINK:-claude-sonnet-4-6}"
 M_OVERRIDE="${CCWATCH_MODEL:-}"
 
 # [HARDENED #12] Validate model names — alphanumeric, hyphens, dots only
@@ -601,6 +601,7 @@ _ls_render_session() {
     (.cognitive_load.safe_to_switch_away//false),(.suggested_action//"")
   ]|join("\t")' <<< "$a" 2>/dev/null) || true
   IFS=$'\t' read -r st ts na br cs cl ss sa <<< "$_sf"
+  [[ "$cs" =~ ^[0-9]+$ ]] || cs=0
   [[ "$cs" -le 2 ]] && _ls_lo+=("$lbl")
   case "$st" in working) _ls_vw=$((_ls_vw+1));; waiting) _ls_vwt=$((_ls_vwt+1));;
     idle) _ls_vi=$((_ls_vi+1));; error) _ls_ve=$((_ls_ve+1));; esac
