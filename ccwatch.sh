@@ -1068,33 +1068,6 @@ _notify_cooldown_ok() {
   (( now - last >= cooldown ))
 }
 
-_notify_summarize() {
-  local raw_content="$1"
-  # Require API key; fall back to empty (caller uses label-only fallback)
-  [[ -n "${ANTHROPIC_API_KEY:-}" ]] || return 1
-  local sys='You summarize Claude Code terminal output for a Slack push notification.
-
-Each input section is labeled [position project @ branch — type]. Position is a spatial label like "top-left" or "bottom-right" describing where the pane sits in the tmux grid.
-
-Output one line per session in this exact format:
-POSITION project @ branch: summary
-
-Example output:
-top-left web @ main: Wants permission to run npm test
-bottom-right api @ feature-x: Asking which database migration strategy to use
-
-Rules:
-- One line per session, max ~15 words for the summary part
-- The summary should say what the session needs from the user
-- Redact anything sensitive: API keys, tokens, passwords, webhook URLs, credentials, env var values
-- No markdown, no code blocks, no bullet points
-- If you cannot tell what is needed, say "needs attention"'
-  local result
-  result=$(_call "fast" "$sys" "$raw_content" 200 2>/dev/null) || return 1
-  [[ -n "$result" ]] || return 1
-  printf '%s' "$result"
-}
-
 _notify_alert() {
   _notify_enabled || { _log "notify: disabled"; return 0; }
   _notify_cooldown_ok || { _log "notify: cooldown active"; return 0; }
