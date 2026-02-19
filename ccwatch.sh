@@ -18,10 +18,22 @@ LOGFILE="$CACHE/ccwatch.log"
 HISTORY="$CACHE/history.jsonl"
 CAP="${CCWATCH_LINES:-80}"
 SCAN_INT="${CCWATCH_SCAN_INTERVAL:-30}"
+OBSIDIAN_VAULT="${CCWATCH_OBSIDIAN_VAULT:-$HOME/ObsidianVault}"
+OBSIDIAN_DAILY="$OBSIDIAN_VAULT/daily"
+OBSIDIAN_TEMPLATE="$OBSIDIAN_VAULT/templates/daily-template.md"
+NOTES_LAST_RUN="$CACHE/notes_last_run"
+NOTES_INTERVAL="${CCWATCH_NOTES_INTERVAL:-900}"
+CLAUDE_PROJECTS="$HOME/.claude/projects"
+CLAUDE_STATS="$HOME/.claude/stats-cache.json"
 
 # Validate numeric env vars
 [[ "$CAP" =~ ^[0-9]+$ ]] || { echo "ERROR: CCWATCH_LINES must be numeric" >&2; exit 1; }
 [[ "$SCAN_INT" =~ ^[0-9]+$ ]] || { echo "ERROR: CCWATCH_SCAN_INTERVAL must be numeric" >&2; exit 1; }
+[[ "$NOTES_INTERVAL" =~ ^[0-9]+$ ]] || { echo "ERROR: CCWATCH_NOTES_INTERVAL must be numeric" >&2; exit 1; }
+# Validate vault path: absolute, no newlines or control chars
+if [[ "$OBSIDIAN_VAULT" != /* ]] || [[ "$OBSIDIAN_VAULT" == *$'\n'* ]] || [[ "$OBSIDIAN_VAULT" == *$'\r'* ]]; then
+  echo "ERROR: CCWATCH_OBSIDIAN_VAULT must be an absolute path" >&2; exit 1
+fi
 
 # [HARDENED #8] Restrictive permissions on cache directory
 mkdir -p "$CACHE"
@@ -371,6 +383,7 @@ _daemon_scan() {
   [[ -z "$prev" ]] && prev=0
   if [[ "$w" -gt "${prev:-0}" ]] && [[ "$w" -gt 0 ]]; then
     echo -ne '\a'
+    _bell_alert
     if [[ "$w" -eq 1 ]]; then
       _voice_alert "One session needs attention."
       _notify_alert "1 session needs attention" "${notify_body//\\n/$'\n'}"
@@ -834,6 +847,22 @@ _voice_enabled() {
   return 1
 }
 
+_bell_enabled() {
+  [[ "${CCWATCH_BELL:-}" == "true" ]] && return 0
+  [[ -f "$CACHE/bell_enabled" ]] && return 0
+  return 1
+}
+
+_bell_alert() {
+  _bell_enabled || return
+  # macOS system sound; fallback to terminal bell
+  if [[ "$(uname)" == "Darwin" ]]; then
+    afplay /System/Library/Sounds/Glass.aiff &>/dev/null &
+  else
+    echo -ne '\a'
+  fi
+}
+
 _voice_alert() {
   _voice_enabled || return
   local msg="$1" be; be=$(_voice_tts); [[ "$be" == "none" ]] && return
@@ -888,6 +917,27 @@ _cmd_voice() {
         echo "  Fast: pip install piper-tts"; }
       echo ""; echo "  ccwatch voice on    Enable voice"
       echo "  ccwatch voice off   Disable voice"
+      ;;
+  esac
+}
+
+_cmd_bell() {
+  local sub="${1:-}"
+  case "$sub" in
+    on)
+      touch "$CACHE/bell_enabled"
+      echo -e "${CG}Bell on${R}"
+      _bell_alert
+      ;;
+    off)
+      rm -f "$CACHE/bell_enabled"
+      echo -e "${D}Bell off${R}"
+      ;;
+    *)
+      if _bell_enabled; then echo -e "Bell: ${CG}on${R}"
+      else echo -e "Bell: ${D}off${R}"; fi
+      echo ""; echo "  ccwatch bell on     Enable bell sound"
+      echo "  ccwatch bell off    Disable bell sound"
       ;;
   esac
 }
@@ -1188,6 +1238,7 @@ run-shell -b "bash '${me_escaped}' daemon start"
 bind-key S display-popup -E "bash '${me_escaped}' --popup status"
 bind-key A display-popup -E "bash '${me_escaped}' --popup ls"
 bind-key P display-popup -E "bash '${me_escaped}' --popup permissions"
+bind-key N display-popup -E "bash '${me_escaped}' --popup notes"
 
 # Session persistence (panes + directories survive reboots)
 set -g @plugin 'tmux-plugins/tpm'
@@ -1224,6 +1275,7 @@ TMUX
   tmux bind-key S display-popup -E "bash '${me_escaped}' --popup status" 2>/dev/null || true
   tmux bind-key A display-popup -E "bash '${me_escaped}' --popup ls" 2>/dev/null || true
   tmux bind-key P display-popup -E "bash '${me_escaped}' --popup permissions" 2>/dev/null || true
+  tmux bind-key N display-popup -E "bash '${me_escaped}' --popup notes" 2>/dev/null || true
 
   # ── Claude Code hooks ──────────────────────────────────
   echo ""
@@ -1311,7 +1363,7 @@ HOOKEOF
   echo -e "    ●4 ?1 !2 ▰▰▱▱▱   ${D}← always visible in tmux${R}"
   echo ""
   echo -e "  ${B}Keybindings${R} (on-demand, ~\$0.01):"
-  echo -e "    prefix+S  status     prefix+A  list all     prefix+P  permissions"
+  echo -e "    prefix+S  status     prefix+A  list all     prefix+P  permissions     prefix+N  notes"
   echo ""
   echo -e "  ${B}CLI${R}:"
   echo -e "    ccwatch              quick glance"
@@ -1319,6 +1371,7 @@ HOOKEOF
   echo -e "    ccwatch permissions  fix your settings.json"
   echo ""
   echo -e "  ${D}Voice:   ccwatch voice on${R}"
+  echo -e "  ${D}Bell:    ccwatch bell on${R}"
   echo -e "  ${D}Discord: ccwatch notify set${R}"
   echo -e "  ${D}Logs:    $CACHE/${R}"
 }
@@ -1372,6 +1425,292 @@ _cmd_key() {
   esac
 }
 
+# ─── NOTES (Obsidian daily note generation) ──────────────────────────────────
+
+# Find today's transcript files across all Claude projects
+_notes_find_todays_transcripts() {
+  local today; today=$(date +%Y-%m-%d)
+  local proj_dir
+  for proj_dir in "$CLAUDE_PROJECTS"/*/; do
+    [[ -d "$proj_dir" ]] || continue
+    local dirname; dirname=$(basename "$proj_dir")
+    local f
+    for f in "$proj_dir"*.jsonl; do
+      [[ -f "$f" ]] || continue
+      # Check if file was modified today (fast stat check)
+      local fdate
+      fdate=$(stat -f '%Sm' -t '%Y-%m-%d' "$f" 2>/dev/null || stat -c '%y' "$f" 2>/dev/null | cut -d' ' -f1) || continue
+      [[ "$fdate" == "$today" ]] || continue
+      # Verify file actually contains today's entries (grep is faster than jq for large files)
+      grep -qF "$today" "$f" 2>/dev/null || continue
+      echo "${dirname}|${f}"
+    done
+  done
+}
+
+# Map project directory name to agent/worktree name
+_notes_extract_agent() {
+  local dirname="$1"
+  # Pattern: -Users-ian-compass-worktrees-AGENT-clients-web → AGENT
+  if [[ "$dirname" =~ -worktrees-([^-]+)- ]]; then
+    echo "${BASH_REMATCH[1]}"
+  else
+    # Fallback: last meaningful segment
+    echo "$dirname" | rev | cut -d'-' -f1 | rev
+  fi
+}
+
+# Extract structured data from one transcript file (today's entries only)
+_notes_extract_session() {
+  local filepath="$1"
+  local today; today=$(date +%Y-%m-%d)
+  local filesize
+  filesize=$(stat -f %z "$filepath" 2>/dev/null || stat -c %s "$filepath" 2>/dev/null || echo 0)
+
+  local jq_filter
+  jq_filter='
+    select(.timestamp and (.timestamp | startswith($today))) |
+    if .type == "user" then
+      (if (.message | type) == "string" then .message
+       elif (.message.content | type) == "string" then .message.content
+       elif (.message.content | type) == "array" then ([.message.content[] | select(.type == "text") | .text] | join(" "))
+       else null end) as $text |
+      if $text and ($text | length) > 0 then
+        {t:"prompt", ts:.timestamp, branch:(.gitBranch // null), text:$text[:150]}
+      else empty end
+    elif .type == "assistant" then
+      .message.content[]? | select(.type == "tool_use") |
+      {t:"tool", name:.name, target:((.input.file_path // .input.path // .input.pattern // (.input.command // "")[:100]) // "")}
+    elif .type == "file-history-snapshot" then
+      {t:"files", files:[.snapshot.trackedFileBackups[]?.path // empty][:10]}
+    else empty end
+  '
+
+  if [[ "$filesize" -gt 2097152 ]]; then
+    # Large file: pre-filter lines containing today's date
+    grep -F "$today" "$filepath" 2>/dev/null | jq -c --arg today "$today" "$jq_filter" 2>/dev/null
+  else
+    jq -c --arg today "$today" "$jq_filter" "$filepath" 2>/dev/null
+  fi
+}
+
+# Gather all activity data into a single JSON object
+_notes_gather_all() {
+  local today; today=$(date +%Y-%m-%d)
+  local agents_json="[]"
+
+  # Collect all session data per agent into temp files
+  local gather_tmp
+  gather_tmp=$(mktemp -d "$CACHE/gather.XXXXXX") || { _log "notes: mktemp failed"; return 1; }
+  trap 'rm -rf "$gather_tmp" 2>/dev/null' RETURN
+
+  while IFS='|' read -r dirname filepath; do
+    [[ -z "$dirname" ]] && continue
+    local agent; agent=$(_notes_extract_agent "$dirname")
+    local session_data
+    session_data=$(_notes_extract_session "$filepath") || continue
+    [[ -z "$session_data" ]] && continue
+    # Append to per-agent file (consolidates multiple transcripts)
+    echo "$session_data" >> "$gather_tmp/$agent"
+  done < <(_notes_find_todays_transcripts)
+
+  # Build per-agent summaries
+  local agent_file
+  for agent_file in "$gather_tmp"/*; do
+    [[ -f "$agent_file" ]] || continue
+    local agent; agent=$(basename "$agent_file")
+    local agent_summary
+    agent_summary=$(jq -sc --arg agent "$agent" '
+      {
+        agent: $agent,
+        branch: ([.[] | select(.t=="prompt" and .branch) | .branch] | first // "unknown"),
+        prompts: [.[] | select(.t=="prompt") | {ts:.ts, text:.text}] | unique_by(.ts),
+        tools: ([.[] | select(.t=="tool") | .name] | group_by(.) | map({tool:.[0], count:length}) | sort_by(-.count)),
+        files: ([.[] | select(.t=="files") | .files[]?] | unique)
+      }
+    ' "$agent_file" 2>/dev/null) || continue
+    [[ -z "$agent_summary" ]] && continue
+    agents_json=$(echo "$agents_json" | jq --argjson new "$agent_summary" '. + [$new]' 2>/dev/null)
+  done
+
+  rm -rf "$gather_tmp" 2>/dev/null
+
+  # Include stats-cache daily stats if available
+  local stats="{}"
+  if [[ -f "$CLAUDE_STATS" ]]; then
+    local _s
+    _s=$(jq --arg today "$today" '[.dailyActivity[]? | select(.date==$today)] | if length > 0 then .[0] else {} end' "$CLAUDE_STATS" 2>/dev/null) || _s="{}"
+    [[ -n "$_s" ]] && stats="$_s"
+  fi
+
+  # Include daemon state if available
+  local daemon="{}"
+  if [[ -f "$DAEMON_STATE" ]]; then
+    daemon=$(jq '{sessions:.count, waiting:.waiting, load:.load}' "$DAEMON_STATE" 2>/dev/null) || daemon="{}"
+  fi
+
+  jq -nc --argjson agents "$agents_json" --argjson stats "$stats" --argjson daemon "$daemon" --arg date "$today" \
+    '{date:$date, agents:$agents, stats:$stats, daemon:$daemon}'
+}
+
+_NOTES_SYSTEM='You update an Obsidian daily note with Claude Code session activity data.
+
+Rules:
+- PRESERVE all existing manually-written content in the note. Never remove or modify manual entries.
+- MERGE new session data into the correct template sections.
+- Work Log format: "- **HH:MM** - [agentN] description of what was done" (use UTC timestamps converted to local intuition, or just the hour)
+- Active Branches: one bullet per agent with branch name and brief status
+- Only add Decisions/Blockers/Follow-ups entries if clearly evidenced in the data
+- Keep %% %% Obsidian comments in sections that remain empty
+- Work Log should be the LAST section in the note
+- Output the COMPLETE note — no markdown fences, no preamble, no explanation
+- Be concise — summarize tool usage patterns (e.g. "edited 5 files in products/"), do not list every tool call
+- Group related prompts into single work log entries where possible
+- If a work log entry already exists for an agent at a similar time, do not duplicate it'
+
+_notes_generate() {
+  local dry_run="${1:-0}"
+  local today; today=$(date +%Y-%m-%d)
+  local day_name; day_name=$(date +%A)
+  # Validate day_name is alphabetic (locale safety)
+  [[ "$day_name" =~ ^[A-Za-z]+$ ]] || day_name="Unknown"
+  local note_path="$OBSIDIAN_DAILY/${today}.md"
+
+  # S2: Validate vault path exists
+  if [[ ! -d "$OBSIDIAN_VAULT" ]]; then
+    echo "ERROR: Obsidian vault not found at $OBSIDIAN_VAULT" >&2
+    echo "  Set CCWATCH_OBSIDIAN_VAULT to your vault path" >&2
+    return 1
+  fi
+
+  # Create daily directory if vault exists
+  mkdir -p "$OBSIDIAN_DAILY"
+
+  # Create daily note from template if it doesn't exist (atomic write)
+  if [[ ! -f "$note_path" ]]; then
+    local tmp_init
+    tmp_init=$(mktemp "$OBSIDIAN_DAILY/.note-init.XXXXXX") || { echo "ERROR: mktemp failed" >&2; return 1; }
+    if [[ -f "$OBSIDIAN_TEMPLATE" ]]; then
+      sed "s|{{date}}|${today}|g; s|{{day}}|${day_name}|g" "$OBSIDIAN_TEMPLATE" > "$tmp_init"
+    else
+      cat > "$tmp_init" << TMPL
+# ${today} ${day_name}
+
+## Active Branches
+%% Per-agent/worktree status %%
+
+## Work Log
+%% Chronological entries of what you worked on %%
+TMPL
+    fi
+    chmod 644 "$tmp_init"
+    mv "$tmp_init" "$note_path"
+  fi
+
+  # Read current note content (cap at 50KB to limit API cost)
+  local current_note
+  current_note=$(head -c 51200 "$note_path")
+
+  # Gather activity data
+  echo -e "${D}Scanning transcripts...${R}" >&2
+  local activity
+  activity=$(_notes_gather_all)
+
+  # Check if there are any agents
+  local agent_count
+  agent_count=$(echo "$activity" | jq '.agents | length' 2>/dev/null) || agent_count=0
+  if [[ "$agent_count" -eq 0 ]]; then
+    echo -e "${D}No Claude Code activity found for today.${R}" >&2
+    return 0
+  fi
+
+  echo -e "${D}Found ${agent_count} agent(s), calling API...${R}" >&2
+
+  # S3: Cap payload size (50KB max)
+  local payload
+  payload=$(jq -c '.' <<< "$activity" 2>/dev/null)
+  if [[ ${#payload} -gt 51200 ]]; then
+    # Truncate: keep agent names/branches/tools, drop individual prompts
+    payload=$(echo "$activity" | jq -c '.agents |= map({agent, branch, tools, files, prompt_count: (.prompts | length)})' 2>/dev/null)
+  fi
+
+  local user_msg
+  user_msg=$(jq -nc --arg note "$current_note" --arg data "$payload" \
+    '"CURRENT NOTE:\n" + $note + "\n\nACTIVITY DATA:\n" + $data')
+  # jq wraps in quotes — unwrap for the API call
+  user_msg=$(echo "$user_msg" | jq -r '.')
+
+  local result
+  result=$(_call "think" "$_NOTES_SYSTEM" "$user_msg" 4000) || {
+    echo "ERROR: API call failed" >&2
+    return 1
+  }
+
+  # S4: Validate AI response
+  if [[ -z "$result" ]]; then
+    echo "ERROR: Empty response from API" >&2; return 1
+  fi
+  if [[ ! "$result" =~ ^#\  ]]; then
+    echo "ERROR: Response doesn't look like a valid note (missing H1)" >&2; return 1
+  fi
+  if [[ ${#result} -lt 50 ]]; then
+    echo "ERROR: Response too short (${#result} chars)" >&2; return 1
+  fi
+  if [[ ${#result} -gt 102400 ]]; then
+    echo "ERROR: Response too large (${#result} chars)" >&2; return 1
+  fi
+  # S4b: Reject responses containing Obsidian-executable directives
+  if grep -qE '<%|```dataviewjs|obsidian://' <<< "$result"; then
+    _log "notes: API response contained suspicious Obsidian directives, rejecting"
+    echo "ERROR: Response contained suspicious content" >&2; return 1
+  fi
+
+  if [[ "$dry_run" -eq 1 ]]; then
+    echo "$result"
+    return 0
+  fi
+
+  # S5: Atomic write — temp in same dir as target (guarantees same-filesystem rename)
+  local tmp_note
+  tmp_note=$(mktemp "$OBSIDIAN_DAILY/.note.XXXXXX") || { echo "ERROR: mktemp failed" >&2; return 1; }
+  echo "$result" > "$tmp_note"
+  chmod 644 "$tmp_note"
+  mv "$tmp_note" "$note_path"
+
+  # Record timestamp
+  date +%s > "$NOTES_LAST_RUN"
+
+  echo -e "${CG}✓ Updated ${note_path}${R}"
+}
+
+_notes_watch() {
+  _check_api
+  echo -e "${B}${CC}ccwatch notes --watch${R}"
+  echo -e "${D}Updating every ${NOTES_INTERVAL}s. Ctrl+C to stop.${R}"
+  echo ""
+  trap 'echo ""; echo "Stopped."; exit 0' INT TERM
+  while true; do
+    local now; now=$(date +%s)
+    local last=0
+    [[ -f "$NOTES_LAST_RUN" ]] && last=$(cat "$NOTES_LAST_RUN" 2>/dev/null || echo 0)
+    [[ "$last" =~ ^[0-9]+$ ]] || last=0
+    if [[ $(( now - last )) -ge "$NOTES_INTERVAL" ]]; then
+      echo -e "${D}[$(date '+%H:%M')] Generating notes...${R}"
+      _notes_generate 0 || _log "notes: generate failed"
+    fi
+    sleep 60
+  done
+}
+
+_cmd_notes() {
+  _check_api
+  case "${1:-}" in
+    --dry-run) _notes_generate 1 ;;
+    --watch) _notes_watch ;;
+    *) _notes_generate 0 ;;
+  esac
+}
+
 # ─── ENTRY ────────────────────────────────────────────────────────────────────
 _resolve_api_key
 
@@ -1396,13 +1735,16 @@ case "${1:-}" in
         ls|list) _cmd_ls ;;
         permissions|perm) shift; case "${1:-}" in
           --apply) _cmd_perms_apply "${2:-user}" ;; --reset) _cmd_perms_reset ;; *) _cmd_perms ;; esac ;;
+        notes) shift; _cmd_notes "$@" ;;
       esac
       echo ""
-      echo -e "  ${D}prefix+S status  prefix+A list all  prefix+P permissions${R}"
+      echo -e "  ${D}prefix+S status  prefix+A list all  prefix+P permissions  prefix+N notes${R}"
     ) 2>&1 | less -R -P " q close | ↑↓ scroll | / search"
     ;;
   key|k) _cmd_key "${2:-}" ;;
   voice|v) _cmd_voice "${2:-}" ;;
+  bell|b) _cmd_bell "${2:-}" ;;
+  notes) shift; _cmd_notes "$@" ;;
   notify|n) shift; _cmd_notify "$@" ;;
   setup) _cmd_setup ;;
   help|--help|-h) cat << 'H'
@@ -1415,7 +1757,11 @@ ccwatch — Ambient Intelligence for Claude Code Sessions
   ccwatch key            API key status (source + partial key)
   ccwatch key set        Store API key in macOS Keychain
   ccwatch key delete     Remove API key from Keychain
+  ccwatch notes            Generate/update Obsidian daily note
+  ccwatch notes --dry-run  Preview note without writing
+  ccwatch notes --watch    Auto-update every 15 min
   ccwatch voice on|off   Toggle voice narration
+  ccwatch bell on|off    Toggle bell sound on attention
   ccwatch notify on|off  Toggle Discord notifications
   ccwatch notify set     Configure Discord webhook
   ccwatch notify test    Send a test notification
@@ -1438,9 +1784,12 @@ Env:
   CCWATCH_MODEL_THINK            Override think-tier model
   CCWATCH_MODEL                  Force single model for everything
   CCWATCH_VOICE=true             Enable voice (or: ccwatch voice on)
+  CCWATCH_BELL=true              Enable bell sound (or: ccwatch bell on)
   CCWATCH_DISCORD_WEBHOOK        Discord webhook URL (or: ccwatch notify set)
   CCWATCH_NOTIFY_COOLDOWN=0      Min seconds between notifications (0=off)
   CCWATCH_SCAN_INTERVAL=30       Daemon scan interval (seconds)
+  CCWATCH_OBSIDIAN_VAULT         Obsidian vault path (default: ~/ObsidianVault)
+  CCWATCH_NOTES_INTERVAL=900     Notes watch interval in seconds (default: 15 min)
 H
   ;; *) echo "Unknown: $1 — try: ccwatch help" ;;
 esac
