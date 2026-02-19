@@ -248,39 +248,65 @@ _cap() {
 }
 
 _pane_position() {
-  # Compute spatial label (top-left, bottom-right, etc.) from tmux coordinates
-  local top="$1" left="$2" win_h="$3" win_w="$4"
+  # Compute spatial label from row position and column rank
+  # top: pane_top coordinate (0 = first row)
+  # col_rank: 0-indexed column position among sorted unique left values
+  # ncols: total number of columns in this window
+  local top="$1" col_rank="$2" ncols="$3"
   local vpos hpos
   if [[ "$top" -eq 0 ]]; then vpos="top"; else vpos="bottom"; fi
-  if [[ "$win_w" -gt 0 ]]; then
-    local third=$((win_w / 3))
-    if [[ "$left" -lt "$third" ]]; then hpos="left"
-    elif [[ "$left" -lt $((third * 2)) ]]; then hpos="center"
-    else hpos="right"; fi
+  if [[ "$ncols" -le 1 ]]; then hpos="left"
+  elif [[ "$ncols" -eq 2 ]]; then
+    if [[ "$col_rank" -eq 0 ]]; then hpos="left"; else hpos="right"; fi
   else
-    hpos="left"
+    if [[ "$col_rank" -eq 0 ]]; then hpos="left"
+    elif [[ "$col_rank" -eq $((ncols - 1)) ]]; then hpos="right"
+    else hpos="center"; fi
   fi
   echo "${vpos}-${hpos}"
 }
 
 _discover() {
+  # Two-pass: collect CC panes, then compute column positions per window
+  # (Avoids associative arrays for bash 3.2 compat on macOS)
+  local pane_data="" all_lefts=""
+
+  # Pass 1: find CC panes and collect left coordinates
   while IFS='|' read -r pid sn wi pi pp pt ptop pleft wh ww; do
     [[ -z "$pid" ]] && continue
-    # Validate pane ID format from tmux output
     [[ "$pid" =~ ^%[0-9]+$ ]] || continue
-    # Sanitize label: alphanumeric, colon, dot, hyphen, underscore only
     local label="${sn}:${wi}.${pi}"
     [[ "$label" =~ ^[a-zA-Z0-9:._-]+$ ]] || continue
     if _is_cc "$pid"; then
-      local pos=""
-      if [[ "$ptop" =~ ^[0-9]+$ ]] && [[ "$pleft" =~ ^[0-9]+$ ]] && \
-         [[ "$wh" =~ ^[0-9]+$ ]] && [[ "$ww" =~ ^[0-9]+$ ]]; then
-        pos=$(_pane_position "$ptop" "$pleft" "$wh" "$ww")
+      local wkey="${sn}:${wi}"
+      pane_data+="${pid}|${label}|${ptop}|${pleft}|${wkey}"$'\n'
+      if [[ "$pleft" =~ ^[0-9]+$ ]]; then
+        all_lefts+="${wkey}|${pleft}"$'\n'
       fi
-      echo "${pid}|${label}|${pos}"
     fi
   done < <(tmux list-panes -a -F \
     '#{pane_id}|#{session_name}|#{window_index}|#{pane_index}|#{pane_pid}|#{pane_title}|#{pane_top}|#{pane_left}|#{window_height}|#{window_width}' 2>/dev/null)
+
+  # Pass 2: compute positions using actual column layout
+  local line
+  while IFS='|' read -r pid label ptop pleft wkey; do
+    [[ -z "$pid" ]] && continue
+    local pos=""
+    if [[ "$ptop" =~ ^[0-9]+$ ]] && [[ "$pleft" =~ ^[0-9]+$ ]]; then
+      # Get sorted unique left values for this window
+      local sorted_lefts
+      sorted_lefts=$(printf '%s' "$all_lefts" | grep "^${wkey}|" | cut -d'|' -f2 | sort -un)
+      local ncols col_rank=0 i=0
+      ncols=$(printf '%s\n' $sorted_lefts | wc -l | tr -d ' ')
+      local lv
+      for lv in $sorted_lefts; do
+        [[ "$lv" -eq "$pleft" ]] && { col_rank=$i; break; }
+        i=$((i+1))
+      done
+      pos=$(_pane_position "$ptop" "$col_rank" "$ncols")
+    fi
+    echo "${pid}|${label}|${pos}"
+  done <<< "$pane_data"
 }
 
 # ─── Pattern-based state detection (no AI) ────────────────────────────────────

@@ -732,22 +732,22 @@ CCWATCH_BELL="false"
 echo ""
 echo "=== _pane_position ==="
 
-# 2x2 grid (window 100x50)
-_assert_eq "2x2: top-left" "top-left" "$(_pane_position 0 0 50 100)"
-_assert_eq "2x2: top-right" "top-right" "$(_pane_position 0 70 50 100)"
-_assert_eq "2x2: bottom-left" "bottom-left" "$(_pane_position 26 0 50 100)"
-_assert_eq "2x2: bottom-right" "bottom-right" "$(_pane_position 26 70 50 100)"
+# 2x2 grid: _pane_position top col_rank ncols
+_assert_eq "2x2: top-left" "top-left" "$(_pane_position 0 0 2)"
+_assert_eq "2x2: top-right" "top-right" "$(_pane_position 0 1 2)"
+_assert_eq "2x2: bottom-left" "bottom-left" "$(_pane_position 26 0 2)"
+_assert_eq "2x2: bottom-right" "bottom-right" "$(_pane_position 26 1 2)"
 
-# 3x2 grid (window 239x55, matching real layout)
-_assert_eq "3x2: top-left" "top-left" "$(_pane_position 0 0 55 239)"
-_assert_eq "3x2: top-center" "top-center" "$(_pane_position 0 95 55 239)"
-_assert_eq "3x2: top-right" "top-right" "$(_pane_position 0 168 55 239)"
-_assert_eq "3x2: bottom-left" "bottom-left" "$(_pane_position 23 0 55 239)"
-_assert_eq "3x2: bottom-center" "bottom-center" "$(_pane_position 23 95 55 239)"
-_assert_eq "3x2: bottom-right" "bottom-right" "$(_pane_position 23 180 55 239)"
+# 3x2 grid
+_assert_eq "3x2: top-left" "top-left" "$(_pane_position 0 0 3)"
+_assert_eq "3x2: top-center" "top-center" "$(_pane_position 0 1 3)"
+_assert_eq "3x2: top-right" "top-right" "$(_pane_position 0 2 3)"
+_assert_eq "3x2: bottom-left" "bottom-left" "$(_pane_position 23 0 3)"
+_assert_eq "3x2: bottom-center" "bottom-center" "$(_pane_position 23 1 3)"
+_assert_eq "3x2: bottom-right" "bottom-right" "$(_pane_position 23 2 3)"
 
 # Single pane (full screen)
-_assert_eq "single: top-left" "top-left" "$(_pane_position 0 0 50 100)"
+_assert_eq "single: top-left" "top-left" "$(_pane_position 0 0 1)"
 
 # ─── 16f. Obsidian filter: rejects script/iframe/javascript/embed ────────────
 echo ""
