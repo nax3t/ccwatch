@@ -1643,6 +1643,31 @@ Rules:
 - Group related prompts into single timeline entries where possible
 - If a timeline entry already exists for an agent at a similar time, do not duplicate it'
 
+_STANDUP_SYSTEM='You generate a concise stand-up summary from an Obsidian daily note.
+
+Given today'\''s daily note content (and optionally raw activity data as fallback), produce a stand-up block:
+
+## Stand-up
+**{DAY_LABEL}**
+- 3-5 bullet points of accomplishments (past tense, concrete outcomes)
+- {DAY_LABEL} will be provided in the user message (e.g. "Yesterday" or "Friday")
+
+**Today**
+- Carry-forward items from Open Items or "Currently:" lines
+- If nothing is obvious, write "- Continue from yesterday"
+
+**Blockers**
+- From Open Items if any are blockers
+- OMIT this sub-section entirely if there are no blockers
+
+Rules:
+- Be concise — each bullet should be one line
+- Focus on outcomes, not process ("Shipped auth flow" not "Worked on authentication")
+- If merging into an existing note that already has a ## Stand-up section, REPLACE that section content but preserve everything else
+- Output the COMPLETE note — no markdown fences, no preamble, no explanation
+- The ## Stand-up section goes immediately after the H1 heading line, before ## Status
+- Keep all other sections exactly as they are'
+
 _notes_generate() {
   local dry_run="${1:-0}"
   local today; today=$(date +%Y-%m-%d)
@@ -1761,6 +1786,115 @@ TMPL
   echo -e "${CG}✓ Updated ${note_path}${R}"
 }
 
+_notes_standup() {
+  local today; today=$(date +%Y-%m-%d)
+
+  # Validate vault path exists
+  if [[ ! -d "$OBSIDIAN_VAULT" ]]; then
+    echo "ERROR: Obsidian vault not found at $OBSIDIAN_VAULT" >&2
+    echo "  Set CCWATCH_OBSIDIAN_VAULT to your vault path" >&2
+    return 1
+  fi
+  mkdir -p "$OBSIDIAN_DAILY"
+
+  # Build source content: prefer today's note, fall back to raw activity
+  local source_content=""
+  local today_note="$OBSIDIAN_DAILY/${today}.md"
+  if [[ -f "$today_note" ]] && [[ -s "$today_note" ]]; then
+    source_content=$(head -c 51200 "$today_note")
+  else
+    echo -e "${D}No daily note for today, gathering raw activity...${R}" >&2
+    local activity
+    activity=$(_notes_gather_all) || { echo "ERROR: Failed to gather activity" >&2; return 1; }
+    local agent_count
+    agent_count=$(echo "$activity" | jq '.agents | length' 2>/dev/null) || agent_count=0
+    if [[ "$agent_count" -eq 0 ]]; then
+      echo -e "${D}No activity found for today.${R}" >&2
+      return 0
+    fi
+    source_content="RAW ACTIVITY DATA:\n$(jq -c '.' <<< "$activity")"
+  fi
+
+  # Compute next working day (skip weekends)
+  local dow; dow=$(date +%u)  # 1=Monday ... 7=Sunday
+  local offset=1
+  local day_label="Yesterday"
+  if [[ "$dow" -eq 5 ]]; then offset=3; day_label="Friday"  # Friday -> Monday
+  elif [[ "$dow" -eq 6 ]]; then offset=2; day_label="Saturday"  # Saturday -> Monday
+  fi
+  local target_date; target_date=$(date -v+${offset}d +%Y-%m-%d)
+  local target_day; target_day=$(date -v+${offset}d +%A)
+  local target_path="$OBSIDIAN_DAILY/${target_date}.md"
+
+  # Create target note from template if it doesn't exist
+  if [[ ! -f "$target_path" ]]; then
+    local tmp_init
+    tmp_init=$(mktemp "$OBSIDIAN_DAILY/.note-init.XXXXXX") || { echo "ERROR: mktemp failed" >&2; return 1; }
+    if [[ -f "$OBSIDIAN_TEMPLATE" ]]; then
+      sed "s|{{date}}|${target_date}|g; s|{{day}}|${target_day}|g" "$OBSIDIAN_TEMPLATE" > "$tmp_init"
+    else
+      cat > "$tmp_init" << TMPL
+# ${target_date} ${target_day}
+
+## Status
+%% One-line status per agent — auto-generated %%
+
+## Notes
+%% Manual notes, links, context %%
+
+## Timeline
+%% Chronological log of all activity %%
+TMPL
+    fi
+    chmod 644 "$tmp_init"
+    mv "$tmp_init" "$target_path"
+  fi
+
+  # Read target note
+  local target_note
+  target_note=$(head -c 51200 "$target_path")
+
+  echo -e "${D}Generating stand-up for ${target_date}...${R}" >&2
+
+  local user_msg
+  user_msg=$(jq -nc --arg target "$target_note" --arg source "$source_content" --arg daylabel "$day_label" \
+    '"DAY_LABEL: " + $daylabel + "\n\nTARGET NOTE (write stand-up into this):\n" + $target + "\n\nTODAY'\''S CONTENT:\n" + $source')
+  user_msg=$(echo "$user_msg" | jq -r '.')
+
+  local result
+  result=$(_call "think" "$_STANDUP_SYSTEM" "$user_msg" 4000) || {
+    echo "ERROR: API call failed" >&2
+    return 1
+  }
+
+  # Validate response
+  if [[ -z "$result" ]]; then
+    echo "ERROR: Empty response from API" >&2; return 1
+  fi
+  if [[ ! "$result" =~ ^#\  ]]; then
+    echo "ERROR: Response doesn't look like a valid note (missing H1)" >&2; return 1
+  fi
+  if [[ ${#result} -lt 50 ]]; then
+    echo "ERROR: Response too short (${#result} chars)" >&2; return 1
+  fi
+  if [[ ${#result} -gt 102400 ]]; then
+    echo "ERROR: Response too large (${#result} chars)" >&2; return 1
+  fi
+  if grep -qE '<%|```dataviewjs|obsidian://|<script|<iframe|javascript:|<embed' <<< "$result"; then
+    _log "standup: API response contained suspicious Obsidian directives, rejecting"
+    echo "ERROR: Response contained suspicious content" >&2; return 1
+  fi
+
+  # Atomic write
+  local tmp_note
+  tmp_note=$(mktemp "$OBSIDIAN_DAILY/.note.XXXXXX") || { echo "ERROR: mktemp failed" >&2; return 1; }
+  echo "$result" > "$tmp_note"
+  chmod 644 "$tmp_note"
+  mv "$tmp_note" "$target_path"
+
+  echo -e "${CG}✓ Stand-up written to ${target_path}${R}"
+}
+
 _notes_watch() {
   _check_api
   echo -e "${B}${CC}ccwatch notes --watch${R}"
@@ -1785,6 +1919,7 @@ _cmd_notes() {
   case "${1:-}" in
     --dry-run) _notes_generate 1 ;;
     --watch) _notes_watch ;;
+    --standup) _notes_standup ;;
     *) _notes_generate 0 ;;
   esac
 }
@@ -1838,6 +1973,7 @@ ccwatch — Ambient Intelligence for Claude Code Sessions
   ccwatch notes            Generate/update Obsidian daily note
   ccwatch notes --dry-run  Preview note without writing
   ccwatch notes --watch    Auto-update every 15 min
+  ccwatch notes --standup  Generate stand-up summary in tomorrow's note
   ccwatch voice on|off   Toggle voice narration
   ccwatch bell on|off    Toggle bell sound on attention
   ccwatch notify on|off  Toggle Slack notifications
