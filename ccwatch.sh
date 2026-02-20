@@ -1562,6 +1562,12 @@ _notes_extract_session() {
   fi
 }
 
+_notes_lookup_pr_title() {
+  local branch="$1"
+  [[ -z "$branch" || "$branch" == "unknown" || "$branch" == "main" || "$branch" == "master" ]] && return
+  gh pr list --head "$branch" --json title --jq '.[0].title' 2>/dev/null
+}
+
 # Gather all activity data into a single JSON object
 _notes_gather_all() {
   local today; today=$(date +%Y-%m-%d)
@@ -1598,6 +1604,13 @@ _notes_gather_all() {
       }
     ' "$agent_file" 2>/dev/null) || continue
     [[ -z "$agent_summary" ]] && continue
+    local branch_name
+    branch_name=$(echo "$agent_summary" | jq -r '.branch' 2>/dev/null)
+    local pr_title
+    pr_title=$(_notes_lookup_pr_title "$branch_name")
+    if [[ -n "$pr_title" ]]; then
+      agent_summary=$(echo "$agent_summary" | jq --arg pr "$pr_title" '.pr_title = $pr' 2>/dev/null)
+    fi
     agents_json=$(echo "$agents_json" | jq --argjson new "$agent_summary" '. + [$new]' 2>/dev/null)
   done
 
@@ -1624,7 +1637,7 @@ _notes_gather_all() {
 _NOTES_SYSTEM='You update an Obsidian daily note with Claude Code session activity data.
 
 Structure (top to bottom):
-1. **Status** — one line per active agent: "- **agentN** on `branch` — [current status phrase]". Status reflects the LATEST activity (e.g. "implementing auth grid" not "started work").
+1. **Status** — one line per active agent: "- **agentN** on `branch` — [current status phrase]". If an agent has a `pr_title` field, show it in parentheses after the branch name, e.g. "on `branch` (PR title) —". Status reflects the LATEST activity (e.g. "implementing auth grid" not "started work").
 2. **Per-agent sections** — each active agent gets an ## agentN section containing:
    - Branch name as a bold line
    - Bulleted accomplishments (past tense, grouped by outcome not by tool call)
