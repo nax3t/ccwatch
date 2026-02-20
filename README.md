@@ -130,7 +130,7 @@ The daemon sends a notification when the **waiting session count increases**. Yo
 
 You won't get notified for sessions that are working normally, finish successfully, or if the waiting count stays the same.
 
-When `ANTHROPIC_API_KEY` is set, notification bodies are summarized by Haiku (~$0.001/notification) into a clean 1-2 sentence description per session, with sensitive content (API keys, tokens, file paths) automatically redacted. If the API key is not set or the call fails, notifications fall back to the raw label + state type.
+Notification bodies show each waiting session's pane label and state type (e.g. `my-project — permission`). No API calls are made for notifications.
 
 ### Optional: @mentions for mobile push
 

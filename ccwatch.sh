@@ -1517,8 +1517,11 @@ _notes_find_todays_transcripts() {
 _notes_extract_agent() {
   local dirname="$1"
   # Pattern: -Users-ian-compass-worktrees-AGENT-clients-web → AGENT
-  if [[ "$dirname" =~ -worktrees-([^-]+)- ]]; then
+  if [[ "$dirname" =~ -worktrees-([^-]+) ]]; then
     echo "${BASH_REMATCH[1]}"
+  # Main repo checkout (not a worktree) for known project paths
+  elif [[ "$dirname" =~ -compass-compass ]]; then
+    echo "main"
   else
     # Fallback: last meaningful segment
     echo "$dirname" | rev | cut -d'-' -f1 | rev
