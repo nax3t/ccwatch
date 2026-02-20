@@ -201,8 +201,10 @@ _call() {
   escaped_key="${escaped_key//$'\n'/}"; escaped_key="${escaped_key//$'\r'/}"
   escaped_key="${escaped_key//\\/\\\\}"
   escaped_key="${escaped_key//\"/\\\"}"
+  local timeout=30
+  (( tok > 1000 )) && timeout=120
   resp=$(printf 'header = "x-api-key: %s"\n' "$escaped_key" | \
-    curl -s --max-time 30 -K - \
+    curl -s --max-time "$timeout" -K - \
     -H "content-type: application/json" \
     -H "anthropic-version: 2023-06-01" \
     -d @"$body_file" \
