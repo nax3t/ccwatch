@@ -1943,7 +1943,7 @@ _cmd_notes() {
   case "${1:-}" in
     --dry-run) _notes_generate 1 ;;
     --watch) _notes_watch ;;
-    --standup) _notes_standup "$2" ;;
+    --standup) _notes_standup "${2:-}" ;;
     *) _notes_generate 0 ;;
   esac
 }
