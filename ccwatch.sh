@@ -1492,9 +1492,9 @@ _cmd_key() {
 
 # ─── NOTES (Obsidian daily note generation) ──────────────────────────────────
 
-# Find today's transcript files across all Claude projects
-_notes_find_todays_transcripts() {
-  local today; today=$(date +%Y-%m-%d)
+# Find transcript files for a given date across all Claude projects
+_notes_find_transcripts() {
+  local today="${1:-$(date +%Y-%m-%d)}"
   local proj_dir
   for proj_dir in "$CLAUDE_PROJECTS"/*/; do
     [[ -d "$proj_dir" ]] || continue
@@ -1528,10 +1528,10 @@ _notes_extract_agent() {
   fi
 }
 
-# Extract structured data from one transcript file (today's entries only)
+# Extract structured data from one transcript file (entries for given date only)
 _notes_extract_session() {
   local filepath="$1"
-  local today; today=$(date +%Y-%m-%d)
+  local today="${2:-$(date +%Y-%m-%d)}"
   local filesize
   filesize=$(stat -f %z "$filepath" 2>/dev/null || stat -c %s "$filepath" 2>/dev/null || echo 0)
 
@@ -1570,7 +1570,7 @@ _notes_lookup_pr_title() {
 
 # Gather all activity data into a single JSON object
 _notes_gather_all() {
-  local today; today=$(date +%Y-%m-%d)
+  local today="${1:-$(date +%Y-%m-%d)}"
   local agents_json="[]"
 
   # Collect all session data per agent into temp files
@@ -1582,11 +1582,11 @@ _notes_gather_all() {
     [[ -z "$dirname" ]] && continue
     local agent; agent=$(_notes_extract_agent "$dirname")
     local session_data
-    session_data=$(_notes_extract_session "$filepath") || continue
+    session_data=$(_notes_extract_session "$filepath" "$today") || continue
     [[ -z "$session_data" ]] && continue
     # Append to per-agent file (consolidates multiple transcripts)
     echo "$session_data" >> "$gather_tmp/$agent"
-  done < <(_notes_find_todays_transcripts)
+  done < <(_notes_find_transcripts "$today")
 
   # Build per-agent summaries
   local agent_file
@@ -1800,7 +1800,17 @@ TMPL
 }
 
 _notes_standup() {
-  local today; today=$(date +%Y-%m-%d)
+  local source_date
+
+  # Parse optional mm/dd/yyyy date argument
+  if [[ -n "${1:-}" ]]; then
+    source_date=$(date -jf '%m/%d/%Y' "$1" +%Y-%m-%d 2>/dev/null) || {
+      echo "ERROR: Invalid date '$1' — expected mm/dd/yyyy" >&2
+      return 1
+    }
+  else
+    source_date=$(date +%Y-%m-%d)
+  fi
 
   # Validate vault path exists
   if [[ ! -d "$OBSIDIAN_VAULT" ]]; then
@@ -1810,33 +1820,34 @@ _notes_standup() {
   fi
   mkdir -p "$OBSIDIAN_DAILY"
 
-  # Build source content: prefer today's note, fall back to raw activity
+  # Build source content: prefer source date's note, fall back to raw activity
   local source_content=""
-  local today_note="$OBSIDIAN_DAILY/${today}.md"
-  if [[ -f "$today_note" ]] && [[ -s "$today_note" ]]; then
-    source_content=$(head -c 51200 "$today_note")
+  local source_note="$OBSIDIAN_DAILY/${source_date}.md"
+  if [[ -f "$source_note" ]] && [[ -s "$source_note" ]]; then
+    source_content=$(head -c 51200 "$source_note")
   else
-    echo -e "${D}No daily note for today, gathering raw activity...${R}" >&2
+    echo -e "${D}No daily note for ${source_date}, gathering raw activity...${R}" >&2
     local activity
-    activity=$(_notes_gather_all) || { echo "ERROR: Failed to gather activity" >&2; return 1; }
+    activity=$(_notes_gather_all "$source_date") || { echo "ERROR: Failed to gather activity" >&2; return 1; }
     local agent_count
     agent_count=$(echo "$activity" | jq '.agents | length' 2>/dev/null) || agent_count=0
     if [[ "$agent_count" -eq 0 ]]; then
-      echo -e "${D}No activity found for today.${R}" >&2
+      echo -e "${D}No activity found for ${source_date}.${R}" >&2
       return 0
     fi
     source_content="RAW ACTIVITY DATA:\n$(jq -c '.' <<< "$activity")"
   fi
 
-  # Compute next working day (skip weekends)
-  local dow; dow=$(date +%u)  # 1=Monday ... 7=Sunday
+  # Compute next working day relative to source_date (skip weekends)
+  local dow; dow=$(date -jf '%Y-%m-%d' "$source_date" +%u)  # 1=Monday ... 7=Sunday
   local offset=1
-  local day_label="Yesterday"
-  if [[ "$dow" -eq 5 ]]; then offset=3; day_label="Friday"  # Friday -> Monday
-  elif [[ "$dow" -eq 6 ]]; then offset=2; day_label="Saturday"  # Saturday -> Monday
+  local day_label
+  day_label=$(date -jf '%Y-%m-%d' "$source_date" +%A)
+  if [[ "$dow" -eq 5 ]]; then offset=3  # Friday -> Monday
+  elif [[ "$dow" -eq 6 ]]; then offset=2  # Saturday -> Monday
   fi
-  local target_date; target_date=$(date -v+${offset}d +%Y-%m-%d)
-  local target_day; target_day=$(date -v+${offset}d +%A)
+  local target_date; target_date=$(date -jf '%Y-%m-%d' -v+${offset}d "$source_date" +%Y-%m-%d)
+  local target_day; target_day=$(date -jf '%Y-%m-%d' -v+${offset}d "$source_date" +%A)
   local target_path="$OBSIDIAN_DAILY/${target_date}.md"
 
   # Create target note from template if it doesn't exist
@@ -1932,7 +1943,7 @@ _cmd_notes() {
   case "${1:-}" in
     --dry-run) _notes_generate 1 ;;
     --watch) _notes_watch ;;
-    --standup) _notes_standup ;;
+    --standup) _notes_standup "$2" ;;
     *) _notes_generate 0 ;;
   esac
 }
